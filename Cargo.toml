@@ -1,0 +1,27 @@
+[package]
+name = "mcpg-mcp-wire"
+version = "0.1.0-beta.13"
+edition = "2024"
+license = "Apache-2.0"
+description = "MCP wire types for every protocol revision mcpg speaks (2025-11-25 sessionful, 2026-07-28 stateless + extensions)"
+
+[dependencies]
+base64 = "0.22"
+bytes = "1"
+http = "1"
+metrics = "0.24"
+schemars = { version = "0.8", default-features = false, features = ["derive", "preserve_order"] }
+serde = { version = "1", features = ["derive"] }
+# preserve_order is load-bearing: param→header promotion resolves duplicate
+# header names first-claimant-wins over the schema's own property order, so
+# an alphabetical (BTreeMap) iteration changes which promotion survives.
+serde_json = { version = "1", features = ["preserve_order"] }
+tracing = "0.1"
+
+[dev-dependencies]
+
+[lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"
+result_large_err = "allow"
+large_enum_variant = "allow"

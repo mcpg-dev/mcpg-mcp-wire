@@ -1,6 +1,6 @@
 [package]
 name = "mcpg-mcp-wire"
-version = "0.1.0-beta.14"
+version = "0.1.0-beta.15"
 edition = "2024"
 license = "Apache-2.0"
 description = "MCP wire types for every protocol revision mcpg speaks (2025-11-25 sessionful, 2026-07-28 stateless + extensions)"

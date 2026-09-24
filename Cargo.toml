@@ -1,16 +1,16 @@
 [package]
 name = "mcpg-mcp-wire"
-version = "0.1.0-beta.28"
+version = "0.1.0-beta.34"
 edition = "2024"
 license = "Apache-2.0"
 description = "MCP wire types for every protocol revision mcpg speaks (2025-11-25 sessionful, 2026-07-28 stateless + extensions)"
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 bytes = "1"
 http = "1"
 metrics = "0.24"
-schemars = { version = "0.8", default-features = false, features = ["derive", "preserve_order"] }
+schemars = { version = "1.2", default-features = false, features = ["derive", "preserve_order", "std"] }
 serde = { version = "1", features = ["derive"] }
 # preserve_order is load-bearing: param→header promotion resolves duplicate
 # header names first-claimant-wins over the schema's own property order, so

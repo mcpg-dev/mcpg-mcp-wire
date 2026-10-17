@@ -25,6 +25,10 @@
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::v_2026_07_28::extensions::events::wire::{
+    ListEventsParams, METHOD_LIST_EVENTS, METHOD_POLL_EVENTS, METHOD_SUBSCRIBE_EVENTS,
+    METHOD_UNSUBSCRIBE_EVENTS, PollEventsParams, SubscribeEventsParams, UnsubscribeEventsParams,
+};
 use crate::v_2026_07_28::extensions::tasks::wire::{
     CancelTaskParams, GetTaskParams, UpdateTaskParams,
 };
@@ -44,6 +48,80 @@ pub enum ProtocolOperation {
     /// SEP-2663 tasks extension methods
     /// (`io.modelcontextprotocol/tasks/*`).
     TasksExtension(TasksExtensionOperation),
+    /// MCP Events extension methods (`events/*`, experimental).
+    EventsExtension(EventsExtensionOperation),
+}
+
+/// MCP Events operations. `events/stream` is absent: it is a long-lived
+/// stream, not a finite request, and is not routed here.
+///
+/// The params of `Subscribe` hold the client's `whsec_` secret. Its
+/// `Debug` is redacted, but `Serialize` is not: never serialize this
+/// operation into a log or an audit record.
+#[derive(Debug, Clone, Serialize)]
+pub enum EventsExtensionOperation {
+    List {
+        request_id: Value,
+        params: ListEventsParams,
+    },
+    Subscribe {
+        request_id: Value,
+        params: SubscribeEventsParams,
+    },
+    Unsubscribe {
+        request_id: Value,
+        params: UnsubscribeEventsParams,
+    },
+    Poll {
+        request_id: Value,
+        params: PollEventsParams,
+    },
+    /// A routed `events/*` request whose params do not parse. It is an
+    /// operation rather than a routing error because only the gateway
+    /// knows whether it serves the extension: while it does not, the
+    /// answer is the `-32601` of any unknown method, not a `-32602` that
+    /// reveals the method exists. `message` quotes no request value.
+    InvalidParams {
+        request_id: Value,
+        method: &'static str,
+        message: String,
+    },
+}
+
+impl EventsExtensionOperation {
+    /// The JSON-RPC `id` of the request.
+    pub fn request_id(&self) -> &Value {
+        match self {
+            Self::List { request_id, .. }
+            | Self::Subscribe { request_id, .. }
+            | Self::Unsubscribe { request_id, .. }
+            | Self::Poll { request_id, .. }
+            | Self::InvalidParams { request_id, .. } => request_id,
+        }
+    }
+
+    /// The JSON-RPC method this operation was routed from.
+    pub fn method(&self) -> &'static str {
+        match self {
+            Self::List { .. } => METHOD_LIST_EVENTS,
+            Self::Subscribe { .. } => METHOD_SUBSCRIBE_EVENTS,
+            Self::Unsubscribe { .. } => METHOD_UNSUBSCRIBE_EVENTS,
+            Self::Poll { .. } => METHOD_POLL_EVENTS,
+            Self::InvalidParams { method, .. } => method,
+        }
+    }
+
+    /// The metrics label, one per method; a request whose params did not
+    /// parse counts under its method.
+    pub fn label(&self) -> &'static str {
+        match self.method() {
+            METHOD_LIST_EVENTS => "events_ext.list",
+            METHOD_SUBSCRIBE_EVENTS => "events_ext.subscribe",
+            METHOD_UNSUBSCRIBE_EVENTS => "events_ext.unsubscribe",
+            METHOD_POLL_EVENTS => "events_ext.poll",
+            _ => "events_ext.unknown",
+        }
+    }
 }
 
 /// SEP-2663 tasks-extension operations. Routed by the modern
@@ -193,6 +271,7 @@ impl ProtocolOperation {
             Self::TasksExtension(TasksExtensionOperation::UpdateTask { .. }) => {
                 "tasks_ext.update_task"
             }
+            Self::EventsExtension(e) => e.label(),
         }
     }
 
@@ -233,6 +312,7 @@ impl ProtocolOperation {
                     Some(request_id.clone())
                 }
             },
+            Self::EventsExtension(e) => Some(e.request_id().clone()),
         }
     }
 }
@@ -271,6 +351,57 @@ mod tests {
         });
         assert_eq!(op.label(), "capabilities.tools_call");
         assert_eq!(op.client_request_id(), Some(json!(42)));
+    }
+
+    #[test]
+    fn events_operations_carry_labels_methods_and_ids() {
+        let list = EventsExtensionOperation::List {
+            request_id: json!("l-1"),
+            params: ListEventsParams::default(),
+        };
+        assert_eq!(list.method(), "events/list");
+        let poll = EventsExtensionOperation::Poll {
+            request_id: json!(9),
+            params: serde_json::from_value(json!({ "name": "a" })).unwrap(),
+        };
+        assert_eq!(poll.method(), "events/poll");
+        let unsubscribe = EventsExtensionOperation::Unsubscribe {
+            request_id: json!(10),
+            params: serde_json::from_value(
+                json!({ "name": "a", "delivery": { "url": "https://h.example/x" } }),
+            )
+            .unwrap(),
+        };
+        assert_eq!(unsubscribe.method(), "events/unsubscribe");
+        let subscribe = EventsExtensionOperation::Subscribe {
+            request_id: json!(11),
+            params: serde_json::from_value(json!({
+                "name": "a",
+                "delivery": {
+                    "url": "https://h.example/x",
+                    "secret": "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+                }
+            }))
+            .unwrap(),
+        };
+        assert_eq!(subscribe.method(), "events/subscribe");
+        let invalid = EventsExtensionOperation::InvalidParams {
+            request_id: json!(12),
+            method: "events/subscribe",
+            message: "missing field `name`".to_owned(),
+        };
+        assert_eq!(invalid.method(), "events/subscribe");
+        for (op, label, id) in [
+            (list, "events_ext.list", json!("l-1")),
+            (poll, "events_ext.poll", json!(9)),
+            (unsubscribe, "events_ext.unsubscribe", json!(10)),
+            (subscribe, "events_ext.subscribe", json!(11)),
+            (invalid, "events_ext.subscribe", json!(12)),
+        ] {
+            let op = ProtocolOperation::EventsExtension(op);
+            assert_eq!(op.label(), label);
+            assert_eq!(op.client_request_id(), Some(id));
+        }
     }
 
     #[test]

@@ -29,6 +29,10 @@ use crate::shared::error::ProtocolError;
 use crate::shared::jsonrpc::{ClientMessage, JSONRPC_VERSION};
 use crate::shared::routing as shared_routing;
 use crate::v_2025_11_25::wire::common::CancelledNotificationParams;
+use crate::v_2026_07_28::extensions::events::wire::{
+    ListEventsParams, METHOD_LIST_EVENTS, METHOD_POLL_EVENTS, METHOD_SUBSCRIBE_EVENTS,
+    METHOD_UNSUBSCRIBE_EVENTS, PollEventsParams, SubscribeEventsParams, UnsubscribeEventsParams,
+};
 use crate::v_2026_07_28::extensions::tasks::wire::{
     CancelTaskParams, GetTaskParams, METHOD_CANCEL_TASK, METHOD_GET_TASK, METHOD_UPDATE_TASK,
     UpdateTaskParams,
@@ -36,7 +40,8 @@ use crate::v_2026_07_28::extensions::tasks::wire::{
 use crate::v_2026_07_28::wire::completion::CompletionCompleteParams;
 use crate::v_2026_07_28::wire::lifecycle::DiscoverParams;
 use crate::v_2026_07_28::wire::operations::{
-    CapabilityOperation, LifecycleOperation, ProtocolOperation, TasksExtensionOperation,
+    CapabilityOperation, EventsExtensionOperation, LifecycleOperation, ProtocolOperation,
+    TasksExtensionOperation,
 };
 use crate::v_2026_07_28::wire::prompts::{PromptGetParams, PromptsListParams};
 use crate::v_2026_07_28::wire::resources::{
@@ -50,8 +55,9 @@ use crate::v_2026_07_28::wire::tools::{ToolCallParams, ToolsListParams};
 ///
 /// `Err(ProtocolError)` for: unsupported JSON-RPC version, missing /
 /// invalid params on methods that require them, and unknown methods.
-/// Unknown notifications never error — they log + return
-/// `NotificationAccepted`.
+/// `events/*` params that do not parse are the exception: they route to
+/// [`EventsExtensionOperation::InvalidParams`]. Unknown notifications
+/// never error — they log + return `NotificationAccepted`.
 pub fn map_client_message_to_operation(
     message: ClientMessage,
 ) -> Result<ProtocolOperation, ProtocolError> {
@@ -195,6 +201,52 @@ pub fn map_client_message_to_operation(
                         },
                     ))
                 }
+                // MCP Events (experimental). Routed whether or not the
+                // client declared anything: the extension defines no client
+                // capability. Whether the gateway serves the methods at all
+                // is the dispatcher's decision, so params that do not parse
+                // become an operation too and the dispatcher picks the error.
+                METHOD_LIST_EVENTS => Ok(events_operation(
+                    shared_routing::optional_params::<ListEventsParams>(
+                        &request,
+                        METHOD_LIST_EVENTS,
+                    ),
+                    request.id,
+                    METHOD_LIST_EVENTS,
+                    |request_id, params| EventsExtensionOperation::List { request_id, params },
+                )),
+                METHOD_SUBSCRIBE_EVENTS => Ok(events_operation(
+                    redacted_params(
+                        &request,
+                        METHOD_SUBSCRIBE_EVENTS,
+                        SubscribeEventsParams::from_value_redacted,
+                    ),
+                    request.id,
+                    METHOD_SUBSCRIBE_EVENTS,
+                    |request_id, params| EventsExtensionOperation::Subscribe { request_id, params },
+                )),
+                METHOD_UNSUBSCRIBE_EVENTS => Ok(events_operation(
+                    redacted_params(
+                        &request,
+                        METHOD_UNSUBSCRIBE_EVENTS,
+                        UnsubscribeEventsParams::from_value_redacted,
+                    ),
+                    request.id,
+                    METHOD_UNSUBSCRIBE_EVENTS,
+                    |request_id, params| EventsExtensionOperation::Unsubscribe {
+                        request_id,
+                        params,
+                    },
+                )),
+                METHOD_POLL_EVENTS => Ok(events_operation(
+                    shared_routing::required_params::<PollEventsParams>(
+                        &request,
+                        METHOD_POLL_EVENTS,
+                    ),
+                    request.id,
+                    METHOD_POLL_EVENTS,
+                    |request_id, params| EventsExtensionOperation::Poll { request_id, params },
+                )),
                 method => Err(ProtocolError::method_not_found(Some(request.id), method)),
             }
         }
@@ -272,6 +324,49 @@ pub fn map_client_message_to_operation(
             ))
         }
     }
+}
+
+/// The events operation for one request: `build` over parsed params, or
+/// [`EventsExtensionOperation::InvalidParams`] carrying the parse failure's
+/// message.
+fn events_operation<T>(
+    parsed: Result<T, ProtocolError>,
+    request_id: serde_json::Value,
+    method: &'static str,
+    build: impl FnOnce(serde_json::Value, T) -> EventsExtensionOperation,
+) -> ProtocolOperation {
+    ProtocolOperation::EventsExtension(match parsed {
+        Ok(params) => build(request_id, params),
+        Err(error) => EventsExtensionOperation::InvalidParams {
+            request_id,
+            method,
+            message: error.message().to_owned(),
+        },
+    })
+}
+
+/// Required params of a method whose body may carry a webhook secret.
+/// `parse` reports failures without quoting any request value, so the
+/// `-32602` message cannot echo the secret.
+fn redacted_params<T>(
+    request: &crate::shared::jsonrpc::JsonRpcRequest,
+    method: &str,
+    parse: fn(serde_json::Value) -> Result<T, String>,
+) -> Result<T, ProtocolError> {
+    let params = request.params.clone().ok_or_else(|| {
+        ProtocolError::invalid_params(
+            Some(request.id.clone()),
+            format!("missing {method} params"),
+            None,
+        )
+    })?;
+    parse(params).map_err(|reason| {
+        ProtocolError::invalid_params(
+            Some(request.id.clone()),
+            format!("invalid {method} params: {reason}"),
+            None,
+        )
+    })
 }
 
 #[cfg(test)]
@@ -570,6 +665,164 @@ mod tests {
             });
             let err = map_client_message_to_operation(msg).unwrap_err();
             assert_eq!(err.code(), -32602, "{method} should be InvalidParams");
+        }
+    }
+
+    fn request(method: &str, params: Option<Value>) -> ClientMessage {
+        ClientMessage::Request(JsonRpcRequest {
+            jsonrpc: JSONRPC_VERSION.to_owned(),
+            id: json!(1),
+            method: method.to_owned(),
+            params,
+        })
+    }
+
+    const SECRET: &str = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
+
+    #[test]
+    fn events_methods_route_to_the_events_extension() {
+        let list = map_client_message_to_operation(request("events/list", None)).unwrap();
+        assert!(matches!(
+            list,
+            ProtocolOperation::EventsExtension(EventsExtensionOperation::List { .. })
+        ));
+
+        let subscribe = map_client_message_to_operation(request(
+            "events/subscribe",
+            Some(json!({
+                "name": "orders.created",
+                "arguments": { "region": "eu" },
+                "delivery": { "mode": "webhook", "url": "https://h.example/hook", "secret": SECRET },
+                "cursor": null,
+                "ttlMs": 3600000
+            })),
+        ))
+        .unwrap();
+        match subscribe {
+            ProtocolOperation::EventsExtension(EventsExtensionOperation::Subscribe {
+                params,
+                ..
+            }) => {
+                assert_eq!(params.name, "orders.created");
+                assert_eq!(params.delivery.secret.expose_secret(), SECRET);
+            }
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+
+        let unsubscribe = map_client_message_to_operation(request(
+            "events/unsubscribe",
+            Some(json!({ "name": "orders.created", "delivery": { "url": "https://h.example/hook" } })),
+        ))
+        .unwrap();
+        assert!(matches!(
+            unsubscribe,
+            ProtocolOperation::EventsExtension(EventsExtensionOperation::Unsubscribe { .. })
+        ));
+
+        let poll = map_client_message_to_operation(request(
+            "events/poll",
+            Some(json!({ "name": "orders.created", "cursor": null })),
+        ))
+        .unwrap();
+        assert!(matches!(
+            poll,
+            ProtocolOperation::EventsExtension(EventsExtensionOperation::Poll { .. })
+        ));
+    }
+
+    /// The rejection an events request routed to, as `(method, message)`.
+    fn invalid_events_params(op: ProtocolOperation) -> (&'static str, String) {
+        match op {
+            ProtocolOperation::EventsExtension(EventsExtensionOperation::InvalidParams {
+                request_id,
+                method,
+                message,
+            }) => {
+                assert_eq!(request_id, json!(1));
+                (method, message)
+            }
+            other => panic!("expected InvalidParams, got {other:?}"),
+        }
+    }
+
+    /// Params that do not parse still route, so the dispatcher can answer
+    /// `-32601` while the extension is off; the operation names the method.
+    #[test]
+    fn events_methods_route_unparsable_params_as_invalid_params() {
+        for method in ["events/subscribe", "events/unsubscribe", "events/poll"] {
+            let op = map_client_message_to_operation(request(method, None)).unwrap();
+            assert_eq!(op.client_request_id(), Some(json!(1)), "{method}");
+            let (routed, message) = invalid_events_params(op);
+            assert_eq!(routed, method);
+            assert!(message.contains(method), "{message}");
+        }
+        let op =
+            map_client_message_to_operation(request("events/list", Some(json!({ "cursor": 5 }))))
+                .unwrap();
+        assert_eq!(invalid_events_params(op).0, "events/list");
+    }
+
+    /// A malformed subscribe never quotes the secret, wherever in the body
+    /// the secret ended up.
+    #[test]
+    fn events_subscribe_rejections_never_echo_the_secret() {
+        for params in [
+            json!({ "name": "x", "delivery": { "url": "https://h.example/a", "secret": "whsec_c2hvcnQ=" } }),
+            json!({ "name": "x", "delivery": SECRET }),
+            json!({ "name": SECRET, "delivery": { "url": 5, "secret": SECRET } }),
+            json!({ "name": "x", "arguments": SECRET, "delivery": { "url": "https://h.example/a", "secret": SECRET } }),
+        ] {
+            let op =
+                map_client_message_to_operation(request("events/subscribe", Some(params.clone())))
+                    .unwrap();
+            let rendered = serde_json::to_string(&op).unwrap();
+            assert!(!rendered.contains("MfKQ9r8"), "{rendered}");
+            assert!(!rendered.contains("c2hvcnQ"), "{rendered}");
+            let (method, message) = invalid_events_params(op);
+            assert_eq!(method, "events/subscribe", "{params}");
+            assert!(!message.contains("MfKQ9r8"), "{message}");
+        }
+        let unsubscribe = json!({ "name": "x", "delivery": SECRET });
+        let op = map_client_message_to_operation(request("events/unsubscribe", Some(unsubscribe)))
+            .unwrap();
+        let (_, message) = invalid_events_params(op);
+        assert!(!message.contains("MfKQ9r8"), "{message}");
+    }
+
+    #[test]
+    fn events_stream_is_not_a_finite_request() {
+        let err =
+            map_client_message_to_operation(request("events/stream", Some(json!({ "name": "x" }))))
+                .unwrap_err();
+        assert_eq!(err.code(), -32601);
+    }
+
+    #[test]
+    fn events_list_changed_from_a_client_is_an_accepted_notification() {
+        let msg = ClientMessage::Notification(JsonRpcNotification {
+            jsonrpc: JSONRPC_VERSION.to_owned(),
+            method: "notifications/events/list_changed".to_owned(),
+            params: None,
+        });
+        assert!(matches!(
+            map_client_message_to_operation(msg).unwrap(),
+            ProtocolOperation::Lifecycle(LifecycleOperation::NotificationAccepted)
+        ));
+    }
+
+    #[test]
+    fn events_methods_do_not_exist_on_the_legacy_wire() {
+        for method in [
+            "events/list",
+            "events/subscribe",
+            "events/unsubscribe",
+            "events/poll",
+            "events/stream",
+        ] {
+            let msg = request(method, Some(json!({ "name": "x" })));
+            let err = crate::v_2025_11_25::wire::routing::map_client_message_to_operation(msg)
+                .unwrap_err();
+            assert_eq!(err.code(), -32601, "{method}");
         }
     }
 

@@ -39,6 +39,7 @@ use serde_json::Value;
 
 use crate::shared::caching::{CacheScope, default_result_type_complete};
 use crate::shared::content::Icon;
+pub use crate::v_2026_07_28::extensions::events::wire::EventsCapability;
 
 /// JSON-RPC method name for the modern discovery request.
 pub const METHOD_SERVER_DISCOVER: &str = "server/discover";
@@ -176,6 +177,12 @@ pub struct ServerCapabilities {
         skip_serializing_if = "Option::is_none"
     )]
     pub completions: Option<CompletionCapability>,
+    /// MCP Events (experimental) at the top-level key the events drafts
+    /// and ChatGPT read. The same extension may also be advertised under
+    /// `extensions["io.modelcontextprotocol/events"]`, where other drafts
+    /// look for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<EventsCapability>,
     /// SEP-2133 extensions — reverse-DNS-keyed opaque advertisement
     /// map. MCPG uses this to surface
     /// `io.modelcontextprotocol/tasks` and any
@@ -349,6 +356,7 @@ mod tests {
                 cache: Some(CacheCapability {}),
             }),
             completions: Some(CompletionCapability {}),
+            events: None,
             extensions: None,
         };
         let r = DiscoverResult {
@@ -382,6 +390,7 @@ mod tests {
         // the plural `completions` key (PR-02).
         assert!(v["capabilities"]["completions"].is_object());
         assert!(v["capabilities"].get("completion").is_none());
+        assert!(v["capabilities"].get("events").is_none());
         assert!(v["capabilities"].get("extensions").is_none());
         assert_eq!(v["instructions"], "Welcome to MCPG.");
         // Round-trip back.
@@ -418,6 +427,36 @@ mod tests {
                 .unwrap()
                 .contains_key("dev.mcpg/idempotency")
         );
+    }
+
+    #[test]
+    fn server_capabilities_carry_events_in_both_locations() {
+        use crate::v_2026_07_28::extensions::events::wire::{CAPABILITY_KEY, EXTENSION_ID};
+        let mut ext = serde_json::Map::new();
+        ext.insert(
+            EXTENSION_ID.to_owned(),
+            EventsCapability::default().to_value(),
+        );
+        let caps = ServerCapabilities {
+            events: Some(EventsCapability::default()),
+            extensions: Some(ext),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&caps).unwrap();
+        assert_eq!(
+            v,
+            json!({
+                "events": {},
+                "extensions": { "io.modelcontextprotocol/events": {} }
+            })
+        );
+        assert!(v.get(CAPABILITY_KEY).is_some());
+        let back: ServerCapabilities = serde_json::from_value(v).unwrap();
+        assert_eq!(back.events, Some(EventsCapability::default()));
+
+        let flagged: ServerCapabilities =
+            serde_json::from_value(json!({ "events": { "listChanged": true } })).unwrap();
+        assert_eq!(flagged.events.unwrap().list_changed, Some(true));
     }
 
     #[test]

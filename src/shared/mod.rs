@@ -14,6 +14,8 @@
 //!   policy engine (version-agnostic).
 //! - [`caching`] — SEP-2549 caching hints (`ttlMs` + `cacheScope`
 //!   response-envelope hints for cacheable results).
+//! - [`canonical`] — RFC 8785 JSON canonicalization, for comparing and
+//!   hashing JSON by value.
 //! - [`completion`] — version-agnostic `completion/complete` wire
 //!   types (prompt-argument / resource-template autocomplete).
 //! - [`content`] — content blocks (text / image / audio / embedded
@@ -32,6 +34,7 @@
 
 pub mod apps;
 pub mod caching;
+pub mod canonical;
 pub mod completion;
 pub mod content;
 pub mod deprecation;

@@ -96,7 +96,7 @@ pub struct JsonRpcError {
     pub error: JsonRpcErrorBody,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JsonRpcErrorBody {
     pub code: i32,
     pub message: String,

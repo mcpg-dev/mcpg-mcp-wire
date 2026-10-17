@@ -1,56 +1,43 @@
-//! `subscriptions/listen` wire types — SEP-2575 (Sessionless MCP) +
-//! SEP-2567.
+//! `subscriptions/listen` wire types (2026-07-28,
+//! `basic/patterns/subscriptions`; SEP-2575, SEP-2663 for task ids).
 //!
-//! In `2026-07-28` the legacy patchwork of long-lived delivery
-//! channels (`GET /mcp` SSE stream, `resources/subscribe` /
-//! `resources/unsubscribe`, `notifications/resources/updated`) is
-//! replaced by a single method: **`subscriptions/listen`**.
-//!
-//! A client POSTs a `subscriptions/listen` request listing the
-//! topics it wants to follow; the server holds the response
-//! connection open and streams events as SSE messages until the
-//! client disconnects or the server times out. Each event is a
-//! standard JSON-RPC notification whose `params._meta` carries the
-//! server-minted `subscriptionId` so the client can correlate
-//! events back to the original `subscriptions/listen` request.
-//!
-//! Wire shape:
+//! A client POSTs a `subscriptions/listen` request naming the
+//! notifications it wants; the server answers with an SSE stream that
+//! stays open until the client closes it or the server ends the
+//! subscription. The subscription's id is the request's JSON-RPC `id`,
+//! as sent: every message on the stream carries it under
+//! `params._meta` (or `result._meta`).
 //!
 //! ```text
 //! POST /mcp                    Mcp-Protocol-Version: 2026-07-28
 //!
 //! { "jsonrpc": "2.0", "id": 7, "method": "subscriptions/listen",
-//!   "params": {
-//!     "subscriptions": [
-//!       { "type": "resources/updated", "uri": "file:///x" },
-//!       { "type": "tools/listChanged" }
-//!     ]
-//!   } }
+//!   "params": { "notifications": {
+//!     "toolsListChanged": true,
+//!     "resourceSubscriptions": ["file:///x"] } } }
 //!
 //! ── HTTP/1.1 200 OK · Content-Type: text/event-stream ──
 //!
-//! data: {
-//!   "jsonrpc": "2.0",
-//!   "id": 7,
-//!   "result": { "subscriptionId": "<server-minted>" }
-//! }
+//! data: { "jsonrpc": "2.0", "method": "notifications/subscriptions/acknowledged",
+//!         "params": { "notifications": { "toolsListChanged": true,
+//!                                        "resourceSubscriptions": ["file:///x"] },
+//!                     "_meta": { "io.modelcontextprotocol/subscriptionId": 7 } } }
 //!
-//! data: {
-//!   "jsonrpc": "2.0",
-//!   "method": "notifications/resources/updated",
-//!   "params": {
-//!     "uri": "file:///x",
-//!     "_meta": { "io.modelcontextprotocol/subscriptionId": "<id>" }
-//!   }
-//! }
+//! data: { "jsonrpc": "2.0", "method": "notifications/resources/updated",
+//!         "params": { "uri": "file:///x",
+//!                     "_meta": { "io.modelcontextprotocol/subscriptionId": 7 } } }
 //!
-//! ...
+//! … and, only when the server ends the subscription itself:
+//!
+//! data: { "jsonrpc": "2.0", "id": 7,
+//!         "result": { "resultType": "complete",
+//!                     "_meta": { "io.modelcontextprotocol/subscriptionId": 7 } } }
 //! ```
 //!
-//! This module owns only the **wire types**. The dispatch arm
-//! (long-lived POST-SSE response, event-stream wiring into the
-//! existing delivery bus and subscription store) lands in Phase
-//! 4.F.
+//! The `notifications` filter has the specification's fields plus
+//! `eventsListChanged`, for the MCP Events extension's
+//! `notifications/events/list_changed`. A server also reads the typed
+//! list `{"subscriptions": [{"type": …}]}`; a client writes the filter.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -70,36 +57,73 @@ pub const META_KEY_SUBSCRIPTION_ID: &str = "io.modelcontextprotocol/subscription
 // Request params.
 // ---------------------------------------------------------------------------
 
-/// Parameters for `subscriptions/listen`. Carries the list of
-/// topics the client wants to follow. The response holds the HTTP
-/// connection open and streams events as SSE messages.
+/// Parameters for `subscriptions/listen`: what the client wants to
+/// receive, as [`SubscriptionTarget`]s.
 ///
-/// Two equivalent wire shapes are accepted on input:
-///
-/// 1. **Typed-array form** (MCPG-canonical):
-///    `{ "subscriptions": [{ "type": "tools/listChanged" }, ...] }`.
-///    Every variant of [`SubscriptionTarget`] is reachable.
-///
-/// 2. **Flag-object form** (spec / SEP-2575):
-///    `{ "notifications": { "toolsListChanged": true,
-///        "promptsListChanged": true, "resourcesListChanged": true } }`.
-///    Boolean flags toggle list-changed subscriptions. Resource-
-///    URI subscriptions aren't expressible in this shape; clients
-///    that need them MUST use the typed-array form.
-///
-/// On serialization we emit the typed-array form (canonical).
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// It serializes as the specification's `notifications` filter
+/// (`toolsListChanged`, `promptsListChanged`, `resourcesListChanged`,
+/// `resourceSubscriptions`, `taskIds`, and `eventsListChanged`). It
+/// deserializes from that filter, from the typed list
+/// `{"subscriptions": [{"type": …}]}`, or from both at once. A task-status
+/// target without a task id (every task of the caller) exists only in
+/// the typed list, so it cannot be serialized.
+#[derive(Debug, Clone)]
 pub struct SubscriptionsListenParams {
-    /// Topics to subscribe to. Order is preserved in the
-    /// initial-event confirmation; the client uses it to disambiguate
-    /// duplicate-typed subscriptions (e.g., two `resources/updated`
-    /// entries with different URIs).
+    /// What to receive, in the order asked.
     pub subscriptions: Vec<SubscriptionTarget>,
-    /// `_meta` for forward-compat (per-subscription throttling
-    /// hints, trace context, etc.).
-    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    /// The request's `_meta`.
     pub meta: Option<Value>,
+}
+
+impl Serialize for SubscriptionsListenParams {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::{Error as _, SerializeMap as _};
+        let mut filter = serde_json::Map::new();
+        let mut resources = Vec::new();
+        let mut tasks = Vec::new();
+        for target in &self.subscriptions {
+            match target {
+                SubscriptionTarget::ToolsListChanged => {
+                    filter.insert("toolsListChanged".to_owned(), Value::Bool(true));
+                }
+                SubscriptionTarget::PromptsListChanged => {
+                    filter.insert("promptsListChanged".to_owned(), Value::Bool(true));
+                }
+                SubscriptionTarget::ResourcesListChanged => {
+                    filter.insert("resourcesListChanged".to_owned(), Value::Bool(true));
+                }
+                SubscriptionTarget::EventsListChanged => {
+                    filter.insert("eventsListChanged".to_owned(), Value::Bool(true));
+                }
+                SubscriptionTarget::ResourcesUpdated { uri } => {
+                    resources.push(Value::String(uri.clone()));
+                }
+                SubscriptionTarget::TasksStatus {
+                    task_id: Some(task_id),
+                } => tasks.push(Value::String(task_id.clone())),
+                SubscriptionTarget::TasksStatus { task_id: None } => {
+                    return Err(S::Error::custom(
+                        "a task-status subscription needs a task id on the 2026-07-28 wire",
+                    ));
+                }
+            }
+        }
+        if !resources.is_empty() {
+            filter.insert("resourceSubscriptions".to_owned(), Value::Array(resources));
+        }
+        if !tasks.is_empty() {
+            filter.insert("taskIds".to_owned(), Value::Array(tasks));
+        }
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("notifications", &filter)?;
+        if let Some(meta) = &self.meta {
+            map.serialize_entry("_meta", meta)?;
+        }
+        map.end()
+    }
 }
 
 impl SubscriptionsListenParams {
@@ -108,8 +132,8 @@ impl SubscriptionsListenParams {
     /// client asked for. Only the list-changed flags the server
     /// actually accepted are present (`true`); `resourceSubscriptions`
     /// lists the resource URIs for which per-resource `updated`
-    /// delivery was established. An empty object means nothing was
-    /// honored.
+    /// delivery was established, and `taskIds` the tasks whose status
+    /// the stream carries. An empty object means nothing was honored.
     ///
     /// `established_resources` is the set of `resources/updated` URIs the
     /// gateway registered, which is a subset of the requested ones: a URI no
@@ -122,18 +146,23 @@ impl SubscriptionsListenParams {
         let mut tools = false;
         let mut prompts = false;
         let mut resources = false;
+        let mut events = false;
+        let mut task_ids: Vec<Value> = Vec::new();
         for target in &self.subscriptions {
             match target {
                 SubscriptionTarget::ToolsListChanged => tools = true,
                 SubscriptionTarget::PromptsListChanged => prompts = true,
                 SubscriptionTarget::ResourcesListChanged => resources = true,
+                SubscriptionTarget::EventsListChanged => events = true,
                 // Reflected from `established_resources` instead, so a target
                 // the gateway skipped is not acked.
                 SubscriptionTarget::ResourcesUpdated { .. } => {}
-                // Task-status delivery is governed by the tasks
-                // extension, not the resources/list-changed surface;
-                // it is not reflected in this object.
-                SubscriptionTarget::TasksStatus { .. } => {}
+                SubscriptionTarget::TasksStatus {
+                    task_id: Some(task_id),
+                } => task_ids.push(Value::String(task_id.clone())),
+                // Every task of the caller: the typed list's own form, which
+                // the specification's filter has no field for.
+                SubscriptionTarget::TasksStatus { task_id: None } => {}
             }
         }
         let mut obj = serde_json::Map::new();
@@ -146,6 +175,9 @@ impl SubscriptionsListenParams {
         if resources {
             obj.insert("resourcesListChanged".to_owned(), Value::Bool(true));
         }
+        if events {
+            obj.insert("eventsListChanged".to_owned(), Value::Bool(true));
+        }
         if !established_resources.is_empty() {
             obj.insert(
                 "resourceSubscriptions".to_owned(),
@@ -156,6 +188,9 @@ impl SubscriptionsListenParams {
                         .collect(),
                 ),
             );
+        }
+        if !task_ids.is_empty() {
+            obj.insert("taskIds".to_owned(), Value::Array(task_ids));
         }
         Value::Object(obj)
     }
@@ -168,27 +203,23 @@ impl<'de> Deserialize<'de> for SubscriptionsListenParams {
     {
         use serde::de::Error as _;
 
-        // Custom intermediate that accepts both wire shapes. The
-        // typed-array form lands in `subscriptions`; the flag-object
-        // form lands in `notifications` and gets translated to
-        // `SubscriptionTarget` variants.
+        // The typed list lands in `subscriptions`; the specification's
+        // filter lands in `notifications` and becomes targets after it.
         #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
         struct Notifications {
             #[serde(default)]
-            #[serde(alias = "tools_list_changed")]
             tools_list_changed: bool,
             #[serde(default)]
-            #[serde(alias = "prompts_list_changed")]
             prompts_list_changed: bool,
             #[serde(default)]
-            #[serde(alias = "resources_list_changed")]
             resources_list_changed: bool,
-            #[serde(default, rename = "toolsListChanged")]
-            tools_list_changed_camel: bool,
-            #[serde(default, rename = "promptsListChanged")]
-            prompts_list_changed_camel: bool,
-            #[serde(default, rename = "resourcesListChanged")]
-            resources_list_changed_camel: bool,
+            #[serde(default)]
+            events_list_changed: bool,
+            #[serde(default)]
+            resource_subscriptions: Vec<String>,
+            #[serde(default)]
+            task_ids: Vec<String>,
         }
 
         #[derive(Deserialize)]
@@ -205,15 +236,30 @@ impl<'de> Deserialize<'de> for SubscriptionsListenParams {
         let wire = Wire::deserialize(deserializer).map_err(D::Error::custom)?;
         let mut targets = wire.subscriptions.unwrap_or_default();
         if let Some(n) = wire.notifications {
-            if n.tools_list_changed || n.tools_list_changed_camel {
+            if n.tools_list_changed {
                 targets.push(SubscriptionTarget::ToolsListChanged);
             }
-            if n.prompts_list_changed || n.prompts_list_changed_camel {
+            if n.prompts_list_changed {
                 targets.push(SubscriptionTarget::PromptsListChanged);
             }
-            if n.resources_list_changed || n.resources_list_changed_camel {
+            if n.resources_list_changed {
                 targets.push(SubscriptionTarget::ResourcesListChanged);
             }
+            if n.events_list_changed {
+                targets.push(SubscriptionTarget::EventsListChanged);
+            }
+            targets.extend(
+                n.resource_subscriptions
+                    .into_iter()
+                    .map(|uri| SubscriptionTarget::ResourcesUpdated { uri }),
+            );
+            targets.extend(
+                n.task_ids
+                    .into_iter()
+                    .map(|task_id| SubscriptionTarget::TasksStatus {
+                        task_id: Some(task_id),
+                    }),
+            );
         }
         Ok(SubscriptionsListenParams {
             subscriptions: targets,
@@ -258,66 +304,49 @@ pub enum SubscriptionTarget {
         #[serde(default, skip_serializing_if = "Option::is_none", rename = "taskId")]
         task_id: Option<String>,
     },
+    /// MCP Events type-catalog change events
+    /// (`notifications/events/list_changed`).
+    #[serde(rename = "events/listChanged")]
+    EventsListChanged,
 }
 
 // ---------------------------------------------------------------------------
 // Server-side frame builders for a `subscriptions/listen` POST-SSE stream.
 // ---------------------------------------------------------------------------
 
-/// FIRST frame on a `subscriptions/listen` stream: the
-/// `notifications/subscriptions/acknowledged` notification carrying
-/// the subscription id (= the listen request's JSON-RPC id) and the
-/// honored-subset `notifications` object. `honored` is the value
-/// [`SubscriptionsListenParams::honored_notifications`] returns.
-pub fn acknowledged_notification(subscription_id: &str, honored: &Value) -> Value {
+/// `_meta` naming subscription `subscription_id`.
+fn subscription_meta(subscription_id: &Value) -> Value {
+    let mut meta = serde_json::Map::new();
+    meta.insert(META_KEY_SUBSCRIPTION_ID.to_owned(), subscription_id.clone());
+    Value::Object(meta)
+}
+
+/// The first frame of a `subscriptions/listen` stream:
+/// `notifications/subscriptions/acknowledged` with the honored filter
+/// ([`SubscriptionsListenParams::honored_notifications`]).
+/// `subscription_id` is the listen request's JSON-RPC id, as sent.
+pub fn acknowledged_notification(subscription_id: &Value, honored: &Value) -> Value {
     serde_json::json!({
         "jsonrpc": crate::shared::jsonrpc::JSONRPC_VERSION,
         "method": "notifications/subscriptions/acknowledged",
         "params": {
-            "subscriptionId": subscription_id,
             "notifications": honored,
-            "_meta": {
-                META_KEY_SUBSCRIPTION_ID: subscription_id,
-            }
+            "_meta": subscription_meta(subscription_id),
         }
     })
 }
 
-/// JSON-RPC response envelope for the `subscriptions/listen` request
-/// itself, sent right after the acknowledgement so the client's
-/// request-correlator can resolve the call. `request_id` is the
-/// listen request's JSON-RPC id, echoed verbatim.
-pub fn listen_response_envelope(
-    request_id: &Value,
-    subscription_id: &str,
-    honored: &Value,
-) -> Value {
+/// The last frame of a long-lived stream the server ends itself
+/// (`subscriptions/listen`, or an extension's, such as `events/stream`):
+/// the result of request `id`, which is also the subscription id. A
+/// stream the client closes ends without one.
+pub fn closed_stream_result(id: &Value) -> Value {
     serde_json::json!({
         "jsonrpc": crate::shared::jsonrpc::JSONRPC_VERSION,
-        "id": request_id,
+        "id": id,
         "result": {
             "resultType": "complete",
-            "subscriptionId": subscription_id,
-            "notifications": honored,
-        }
-    })
-}
-
-/// Graceful terminal frame emitted when the delivery bus closes
-/// (server shutdown / session teardown): the
-/// `notifications/subscriptions/complete` notification, correlated to
-/// the listen request so the client sees an orderly close rather than
-/// a bare socket drop.
-pub fn complete_notification(subscription_id: &str) -> Value {
-    serde_json::json!({
-        "jsonrpc": crate::shared::jsonrpc::JSONRPC_VERSION,
-        "method": "notifications/subscriptions/complete",
-        "params": {
-            "resultType": "complete",
-            "subscriptionId": subscription_id,
-            "_meta": {
-                META_KEY_SUBSCRIPTION_ID: subscription_id,
-            }
+            "_meta": subscription_meta(id),
         }
     })
 }
@@ -384,6 +413,13 @@ pub fn subscription_matches(targets: &[SubscriptionTarget], method: &str, payloa
                     }
                 }
             }
+            SubscriptionTarget::EventsListChanged => {
+                if method
+                    == crate::v_2026_07_28::extensions::events::wire::METHOD_NOTIFICATIONS_LIST_CHANGED
+                {
+                    return true;
+                }
+            }
         }
     }
     false
@@ -392,7 +428,7 @@ pub fn subscription_matches(targets: &[SubscriptionTarget], method: &str, payloa
 /// Stamp `params._meta.io.modelcontextprotocol/subscriptionId` on a
 /// delivery-bus notification. Mutates in place; creates the `_meta`
 /// object when missing.
-pub fn inject_subscription_id_meta(payload: &mut Value, subscription_id: &str) {
+pub fn inject_subscription_id_meta(payload: &mut Value, subscription_id: &Value) {
     let Some(obj) = payload.as_object_mut() else {
         return;
     };
@@ -406,10 +442,7 @@ pub fn inject_subscription_id_meta(payload: &mut Value, subscription_id: &str) {
         .entry("_meta")
         .or_insert_with(|| Value::Object(serde_json::Map::new()));
     if let Some(meta_obj) = meta.as_object_mut() {
-        meta_obj.insert(
-            META_KEY_SUBSCRIPTION_ID.to_owned(),
-            Value::String(subscription_id.to_owned()),
-        );
+        meta_obj.insert(META_KEY_SUBSCRIPTION_ID.to_owned(), subscription_id.clone());
     }
 }
 
@@ -439,11 +472,37 @@ mod tests {
                 "type": "io.modelcontextprotocol/tasks/status",
                 "taskId": "task-42"
             }),
+            json!({ "type": "events/listChanged" }),
         ] {
             let parsed: SubscriptionTarget = serde_json::from_value(variant.clone()).unwrap();
             let back = serde_json::to_value(&parsed).unwrap();
             assert_eq!(back, variant);
         }
+    }
+
+    #[test]
+    fn events_list_changed_is_honored_and_matched() {
+        let params = SubscriptionsListenParams {
+            subscriptions: vec![SubscriptionTarget::EventsListChanged],
+            meta: None,
+        };
+        assert_eq!(
+            params.honored_notifications(&[]),
+            json!({ "eventsListChanged": true })
+        );
+        let targets = [SubscriptionTarget::EventsListChanged];
+        let notification =
+            json!({ "jsonrpc": "2.0", "method": "notifications/events/list_changed" });
+        assert!(subscription_matches(
+            &targets,
+            "notifications/events/list_changed",
+            &notification
+        ));
+        assert!(!subscription_matches(
+            &targets,
+            "notifications/tools/list_changed",
+            &notification
+        ));
     }
 
     #[test]
@@ -454,25 +513,71 @@ mod tests {
     }
 
     #[test]
-    fn subscriptions_listen_params_full_round_trip() {
+    fn listen_params_serialize_as_the_specification_filter_and_round_trip() {
         let params = SubscriptionsListenParams {
             subscriptions: vec![
                 SubscriptionTarget::ResourcesUpdated {
                     uri: "mcpg://overview".to_owned(),
                 },
                 SubscriptionTarget::ToolsListChanged,
+                SubscriptionTarget::TasksStatus {
+                    task_id: Some("task-42".to_owned()),
+                },
+                SubscriptionTarget::EventsListChanged,
             ],
             meta: Some(json!({
                 "io.modelcontextprotocol/traceparent": "00-x-y-01"
             })),
         };
         let v = serde_json::to_value(&params).unwrap();
-        assert_eq!(v["subscriptions"][0]["type"], "resources/updated");
-        assert_eq!(v["subscriptions"][0]["uri"], "mcpg://overview");
-        assert_eq!(v["subscriptions"][1]["type"], "tools/listChanged");
-        assert!(v["_meta"]["io.modelcontextprotocol/traceparent"].is_string());
+        assert_eq!(
+            v,
+            json!({
+                "notifications": {
+                    "toolsListChanged": true,
+                    "eventsListChanged": true,
+                    "resourceSubscriptions": ["mcpg://overview"],
+                    "taskIds": ["task-42"]
+                },
+                "_meta": { "io.modelcontextprotocol/traceparent": "00-x-y-01" }
+            })
+        );
         let back: SubscriptionsListenParams = serde_json::from_value(v).unwrap();
-        assert_eq!(back.subscriptions.len(), 2);
+        assert_eq!(back.subscriptions.len(), 4);
+        for target in &params.subscriptions {
+            assert!(back.subscriptions.contains(target), "{target:?}");
+        }
+    }
+
+    #[test]
+    fn a_task_status_target_without_an_id_has_no_specification_form() {
+        let params = SubscriptionsListenParams {
+            subscriptions: vec![SubscriptionTarget::TasksStatus { task_id: None }],
+            meta: None,
+        };
+        assert!(serde_json::to_value(&params).is_err());
+    }
+
+    #[test]
+    fn the_typed_list_is_still_read() {
+        let params: SubscriptionsListenParams = serde_json::from_value(json!({
+            "subscriptions": [
+                { "type": "tools/listChanged" },
+                { "type": "io.modelcontextprotocol/tasks/status" }
+            ],
+            "notifications": { "resourceSubscriptions": ["file:///a"] }
+        }))
+        .unwrap();
+        assert_eq!(
+            params.subscriptions,
+            vec![
+                SubscriptionTarget::ToolsListChanged,
+                SubscriptionTarget::TasksStatus { task_id: None },
+                SubscriptionTarget::ResourcesUpdated {
+                    uri: "file:///a".to_owned()
+                },
+            ]
+        );
     }
 
     #[test]
@@ -486,15 +591,18 @@ mod tests {
                 SubscriptionTarget::ResourcesUpdated {
                     uri: "file:///b".to_owned(),
                 },
-                // Task-status is governed by the tasks extension, not
-                // the list-changed surface — excluded from the object.
+                // Every task of the caller has no field in the filter.
                 SubscriptionTarget::TasksStatus { task_id: None },
+                SubscriptionTarget::TasksStatus {
+                    task_id: Some("task-9".to_owned()),
+                },
             ],
             meta: None,
         };
         let honored =
             params.honored_notifications(&["file:///a".to_owned(), "file:///b".to_owned()]);
         assert_eq!(honored["toolsListChanged"], true);
+        assert_eq!(honored["taskIds"], json!(["task-9"]));
         // Targets that weren't requested are absent (not `false`).
         assert!(honored.get("promptsListChanged").is_none());
         assert!(honored.get("resourcesListChanged").is_none());
@@ -558,83 +666,50 @@ mod tests {
         assert!(v.get("_meta").is_none());
     }
 
-    // -- Byte-equivalence guards ------------------------------------------
-    //
-    // The modern HTTP transport builds these three frames by calling the
-    // constructors above instead of inlining `json!`. Each guard pins the
-    // constructor output against the exact literal the transport used to
-    // hand-build, so the wire cannot drift.
+    // -- The frames, as the specification shows them --------------------
 
     #[test]
-    fn acknowledged_notification_matches_inline_wire() {
-        for (subscription_id, honored) in [
-            ("req-7", json!({ "toolsListChanged": true })),
-            ("", json!({})),
-        ] {
-            let inline = json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/subscriptions/acknowledged",
-                "params": {
-                    "subscriptionId": subscription_id,
-                    "notifications": honored,
-                    "_meta": {
-                        "io.modelcontextprotocol/subscriptionId": subscription_id,
-                    }
-                }
-            });
-            assert_eq!(acknowledged_notification(subscription_id, &honored), inline);
-        }
-    }
-
-    #[test]
-    fn listen_response_envelope_matches_inline_wire() {
-        for request_id in [json!(7), json!("req-7"), Value::Null] {
-            let subscription_id = "req-7";
-            let honored = json!({ "resourceSubscriptions": ["file:///a"] });
-            let inline = json!({
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {
-                    "resultType": "complete",
-                    "subscriptionId": subscription_id,
-                    "notifications": honored,
-                }
-            });
+    fn the_acknowledgement_carries_the_request_id_as_sent() {
+        for id in [json!(1), json!("req-7")] {
             assert_eq!(
-                listen_response_envelope(&request_id, subscription_id, &honored),
-                inline
+                acknowledged_notification(&id, &json!({ "toolsListChanged": true })),
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/subscriptions/acknowledged",
+                    "params": {
+                        "notifications": { "toolsListChanged": true },
+                        "_meta": { "io.modelcontextprotocol/subscriptionId": id }
+                    }
+                })
             );
         }
     }
 
     #[test]
-    fn complete_notification_matches_inline_wire() {
-        let subscription_id = "req-7";
-        let inline = json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/subscriptions/complete",
-            "params": {
-                "resultType": "complete",
-                "subscriptionId": subscription_id,
-                "_meta": {
-                    "io.modelcontextprotocol/subscriptionId": subscription_id,
-                }
-            }
-        });
-        assert_eq!(complete_notification(subscription_id), inline);
+    fn a_closed_stream_answers_its_request() {
+        for id in [json!(1), json!("req-7")] {
+            assert_eq!(
+                closed_stream_result(&id),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "resultType": "complete",
+                        "_meta": { "io.modelcontextprotocol/subscriptionId": id }
+                    }
+                })
+            );
+        }
     }
 
     #[test]
-    fn inject_subscription_id_meta_matches_inline_wire() {
-        // The live path forwards the delivery-bus payload with the
-        // subscription id stamped into `params._meta`; nothing else on
-        // the frame changes.
+    fn a_delivered_notification_is_stamped_with_the_request_id() {
         let mut payload = json!({
             "jsonrpc": "2.0",
             "method": "notifications/resources/updated",
             "params": { "uri": "file:///x" }
         });
-        inject_subscription_id_meta(&mut payload, "sub-1");
+        inject_subscription_id_meta(&mut payload, &json!(1));
         assert_eq!(
             payload,
             json!({
@@ -642,9 +717,7 @@ mod tests {
                 "method": "notifications/resources/updated",
                 "params": {
                     "uri": "file:///x",
-                    "_meta": {
-                        "io.modelcontextprotocol/subscriptionId": "sub-1",
-                    }
+                    "_meta": { "io.modelcontextprotocol/subscriptionId": 1 }
                 }
             })
         );

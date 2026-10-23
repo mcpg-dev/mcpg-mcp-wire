@@ -1,6 +1,6 @@
 [package]
 name = "mcpg-mcp-wire"
-version = "0.1.0-beta.41"
+version = "0.1.0-beta.42"
 edition = "2024"
 license = "Apache-2.0"
 description = "MCP wire types for every protocol revision mcpg speaks (2025-11-25 sessionful, 2026-07-28 stateless + extensions)"
@@ -9,7 +9,7 @@ description = "MCP wire types for every protocol revision mcpg speaks (2025-11-2
 base64 = "0.23"
 bytes = "1"
 http = "1"
-mcpg-standard-webhooks = { git = "https://github.com/mcpg-dev/mcpg-standard-webhooks", tag = "v0.1.0-beta.3", version = "=0.1.0-beta.3" }
+mcpg-standard-webhooks = { git = "https://github.com/mcpg-dev/mcpg-standard-webhooks", tag = "v0.1.0-beta.4", version = "=0.1.0-beta.4" }
 metrics = "0.24"
 schemars = { version = "1.2", default-features = false, features = ["derive", "preserve_order", "std"] }
 serde = { version = "1", features = ["derive"] }

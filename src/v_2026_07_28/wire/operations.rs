@@ -50,6 +50,9 @@ pub enum ProtocolOperation {
     TasksExtension(TasksExtensionOperation),
     /// MCP Events extension methods (`events/*`, experimental).
     EventsExtension(EventsExtensionOperation),
+    /// SEP-2640 Skills extension methods (`skills/*`,
+    /// `resources/directory/read`).
+    SkillsExtension(crate::shared::skills::SkillsOperation),
 }
 
 /// MCP Events operations. `events/stream` is absent: it is a long-lived
@@ -272,6 +275,7 @@ impl ProtocolOperation {
                 "tasks_ext.update_task"
             }
             Self::EventsExtension(e) => e.label(),
+            Self::SkillsExtension(s) => s.label(),
         }
     }
 
@@ -313,6 +317,7 @@ impl ProtocolOperation {
                 }
             },
             Self::EventsExtension(e) => Some(e.request_id().clone()),
+            Self::SkillsExtension(s) => Some(s.request_id().clone()),
         }
     }
 }

@@ -247,6 +247,13 @@ pub fn map_client_message_to_operation(
                     METHOD_POLL_EVENTS,
                     |request_id, params| EventsExtensionOperation::Poll { request_id, params },
                 )),
+                // SEP-2640 Skills, routed like the events methods: the
+                // dispatcher decides whether they are served.
+                method if crate::shared::skills::is_skills_method(method) => {
+                    Ok(ProtocolOperation::SkillsExtension(
+                        crate::shared::skills::route_request(&request),
+                    ))
+                }
                 method => Err(ProtocolError::method_not_found(Some(request.id), method)),
             }
         }

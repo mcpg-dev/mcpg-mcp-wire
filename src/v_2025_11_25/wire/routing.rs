@@ -228,6 +228,12 @@ pub fn map_client_message_to_operation(
                         params,
                     }))
                 }
+                // SEP-2640 Skills. Whether the gateway serves them is the
+                // dispatcher's decision, so params that do not parse are an
+                // operation too and the dispatcher picks the error.
+                method if crate::shared::skills::is_skills_method(method) => Ok(
+                    ProtocolOperation::Skills(crate::shared::skills::route_request(&request)),
+                ),
                 method => Err(ProtocolError::method_not_found(Some(request.id), method)),
             }
         }

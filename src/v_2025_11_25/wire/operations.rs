@@ -47,6 +47,9 @@ pub enum ProtocolOperation {
     Capabilities(CapabilityOperation),
     Tasks(TaskOperation),
     Logging(LoggingOperation),
+    /// SEP-2640 Skills extension methods (`skills/*`,
+    /// `resources/directory/read`).
+    Skills(crate::shared::skills::SkillsOperation),
     /// Synthetic variant carrying a client-side response to a
     /// server-initiated request (sampling / elicitation / roots).
     /// The pipeline-resumption flow looks this up by `response_id`.
@@ -209,6 +212,7 @@ impl ProtocolOperation {
             Self::Tasks(TaskOperation::Cancel { .. }) => "tasks.cancel",
             Self::Tasks(TaskOperation::List { .. }) => "tasks.list",
             Self::Logging(LoggingOperation::SetLevel { .. }) => "logging.set_level",
+            Self::Skills(op) => op.label(),
             Self::ServerRequestResponse { .. } => "server_request_response",
         }
     }
@@ -255,6 +259,7 @@ impl ProtocolOperation {
             Self::Logging(LoggingOperation::SetLevel { request_id, .. }) => {
                 Some(request_id.clone())
             }
+            Self::Skills(op) => Some(op.request_id().clone()),
             Self::ServerRequestResponse { .. } => None,
         }
     }

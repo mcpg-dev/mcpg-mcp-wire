@@ -26,6 +26,8 @@
 //!   `ProtocolHandler` boundary (`ProtocolMessage`,
 //!   `PipelineSuspension`, etc.).
 //! - [`routing`] — params extraction shared by both wires' method routers.
+//! - [`skills`] — SEP-2640 Skills extension: `skills/list`, `skills/get`
+//!   and `resources/directory/read` wire types, routed by both wires.
 //!
 //! The `ProtocolHandler` trait itself stays in the gateway
 //! (`mcpg::protocol::shared::traits`): it is the seam between these
@@ -44,6 +46,7 @@ pub mod jsonrpc;
 pub mod messages;
 pub mod meta;
 pub mod routing;
+pub mod skills;
 
 /// HTTP header carrying the negotiated MCP protocol version on every
 /// Streamable HTTP request. The name is stable across every revision

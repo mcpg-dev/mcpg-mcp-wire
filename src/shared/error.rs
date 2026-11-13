@@ -88,6 +88,22 @@ impl ProtocolError {
         }
     }
 
+    /// Build an error the server's own application logic chose, as it is:
+    /// its code, message and data.
+    pub fn application(
+        id: Option<Value>,
+        code: i32,
+        message: impl Into<String>,
+        data: Option<Value>,
+    ) -> Self {
+        Self {
+            id,
+            code,
+            message: message.into(),
+            data,
+        }
+    }
+
     /// Build a Method-Not-Found error (`-32601`) including the
     /// unknown method name in the message.
     pub fn method_not_found(id: Option<Value>, method: impl Into<String>) -> Self {

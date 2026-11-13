@@ -329,6 +329,16 @@ impl EventsError {
         }
     }
 
+    /// An error the server's own application logic chose, as it is: an
+    /// admission decision names its own code, message and data.
+    pub fn application(code: i32, message: impl Into<String>, data: Option<Value>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            data,
+        }
+    }
+
     /// Add one entry to `data`, creating the object when absent. For a
     /// transport marker such as a missing-scope list; the marker must not
     /// collide with the code's own `data` fields.

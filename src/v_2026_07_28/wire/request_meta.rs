@@ -1,11 +1,11 @@
 //! SEP-2575 per-request `_meta` identity triple.
 //!
-//! The stateless wire has no `initialize` handshake, so every id-bearing
-//! request carries the client identity it would otherwise have negotiated:
+//! The wire is stateless, so every id-bearing request carries the
+//! client's identity itself:
 //! `params._meta.io.modelcontextprotocol/{protocolVersion, clientInfo,
 //! clientCapabilities}`. `server/discover` requires it unconditionally;
 //! the rest of the method surface requires it only when the operator
-//! opts in via `server.enforce_modern_request_meta`.
+//! opts in via `server.enforce_request_meta`.
 
 use serde_json::Value;
 
@@ -14,8 +14,7 @@ use crate::shared::messages::TransportRejection;
 /// Return the first SEP-2575 per-request `_meta` identity key missing
 /// from a request body, or `None` when all three are present. The
 /// triple is `params._meta.io.modelcontextprotocol/{protocolVersion,
-/// clientInfo, clientCapabilities}` — the stateless replacement for
-/// the `initialize` handshake.
+/// clientInfo, clientCapabilities}`.
 pub fn missing_request_meta_key(body: &Value) -> Option<&'static str> {
     let params = body.as_object().and_then(|obj| obj.get("params"));
     let meta = params.and_then(|p| p.get("_meta"));
@@ -52,7 +51,7 @@ pub fn missing_meta_rejection(missing: &str, jsonrpc_id: Option<Value>) -> Trans
         error_code: -32602,
         message: format!(
             "SEP-2575 stateless request is missing required `_meta` \
-             key: `{missing}`. Modern requests MUST carry \
+             key: `{missing}`. Requests MUST carry \
              `params._meta.io.modelcontextprotocol/{{protocolVersion, \
              clientInfo, clientCapabilities}}`."
         ),
@@ -61,9 +60,9 @@ pub fn missing_meta_rejection(missing: &str, jsonrpc_id: Option<Value>) -> Trans
     }
 }
 
-/// TOOLS-09 opt-in enforcement. When `server.enforce_modern_request_meta`
+/// Opt-in enforcement. When `server.enforce_request_meta`
 /// is on, the SEP-2575 per-request `_meta` identity triple is required
-/// on EVERY id-bearing modern method (not just `server/discover`).
+/// on EVERY id-bearing method (not just `server/discover`).
 /// Notifications (id-less bodies) and `server/discover` (already
 /// enforced unconditionally in `validate_transport_headers`) are
 /// skipped here. Returns the rejection to send, or `None` to accept.

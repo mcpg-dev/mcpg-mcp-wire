@@ -21,9 +21,8 @@ pub mod tools;
 // Wire-string identifiers + transport-header names.
 // ---------------------------------------------------------------------------
 
-/// Wire-string identifier for this revision — the final published
-/// MCP revision date. `ProtocolVersion::parse()` also accepts the
-/// pre-final `"DRAFT-2026-v1"` label as a transitional inbound alias.
+/// Wire-string identifier for this revision — the MCP revision date,
+/// and the only protocol version mcpg serves or speaks.
 pub const SUPPORTED_PROTOCOL_VERSION: &str = "2026-07-28";
 
 pub use crate::shared::PROTOCOL_VERSION_HEADER;

@@ -1,11 +1,9 @@
-//! Version-agnostic `completion/complete` wire types.
+//! `completion/complete` wire types.
 //!
 //! `completion/complete` is the autocomplete surface clients call when
 //! a user is editing a prompt argument or resource-template variable.
-//! The wire shape is identical across the `2025-11-25` and
-//! `2026-07-28` revisions, so the types live here once and each
-//! version module re-exports them. Per-version method-name constants
-//! stay version-side.
+//! [`crate::v_2026_07_28::wire::completion`] re-exports these types
+//! beside the method-name constant.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,7 +14,7 @@ pub struct CompletionCompleteParams {
     #[serde(rename = "ref")]
     pub reference: CompletionReference,
     pub argument: CompletionArgument,
-    /// Previously-resolved arguments the server should take into
+    /// Arguments already resolved, which the server should take into
     /// account when producing suggestions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<CompletionContext>,

@@ -1,34 +1,28 @@
 //! Method-name → operation router for MCP revision `2026-07-28`.
 //!
-//! Mirror of [`v_2025_11_25::wire::routing`](crate::v_2025_11_25::wire::routing)
-//! for the modern method surface. The body is the same shape — one
-//! `match` on `method`, each arm parses the params into a typed
-//! struct and wraps in a [`ProtocolOperation`] variant — but the
-//! method set is different:
+//! One `match` on `method`; each arm parses the params into a typed
+//! struct and wraps it in a [`ProtocolOperation`] variant:
 //!
-//! - **`server/discover`** is the lone discovery method (replaces
-//!   `initialize`).
+//! - **`server/discover`** is the discovery method.
 //! - **`tools/{list,call}`**, **`prompts/{list,get}`**,
 //!   **`resources/{list,read}`**, **`resources/templates/list`**,
 //!   and **`completion/complete`** are the capability methods.
-//! - **`subscriptions/listen`** and the tasks-extension methods
-//!   (`io.modelcontextprotocol/tasks/*`) route to their respective
-//!   dispatch arms.
-//! - **Legacy methods that DON'T exist in modern** return
-//!   `method_not_found`: `initialize`, `notifications/initialized`,
-//!   `ping`, `logging/setLevel`, `resources/{subscribe,unsubscribe}`,
-//!   `tasks/result`, `tasks/list`. The modern handler refuses
-//!   them rather than silently accepting under the modern wire.
+//! - **`subscriptions/listen`**, the tasks-extension methods
+//!   (`tasks/{get,update,cancel}`), the MCP Events methods and the
+//!   Skills methods route to their respective dispatch arms.
+//! - **Every other method** is `method_not_found`, including
+//!   `initialize`, `ping`, `logging/setLevel`,
+//!   `resources/{subscribe,unsubscribe}`, `tasks/result` and
+//!   `tasks/list`, which this revision does not define.
 //!
-//! Notifications follow the same pattern as legacy: known names
-//! route to typed lifecycle variants; unknown spec-namespaced names
-//! log at WARN; unknown non-namespaced names log at DEBUG; both
-//! return `NotificationAccepted`.
+//! Notifications: known names route to typed lifecycle variants;
+//! unknown spec-namespaced names log at WARN; unknown non-namespaced
+//! names log at DEBUG; both return `NotificationAccepted`.
 
 use crate::shared::error::ProtocolError;
-use crate::shared::jsonrpc::{ClientMessage, JSONRPC_VERSION};
+use crate::shared::jsonrpc::{ClientMessage, JSONRPC_VERSION, JsonRpcRequest};
+use crate::shared::notifications::CancelledNotificationParams;
 use crate::shared::routing as shared_routing;
-use crate::v_2025_11_25::wire::common::CancelledNotificationParams;
 use crate::v_2026_07_28::extensions::events::wire::{
     ListEventsParams, METHOD_LIST_EVENTS, METHOD_POLL_EVENTS, METHOD_SUBSCRIBE_EVENTS,
     METHOD_UNSUBSCRIBE_EVENTS, PollEventsParams, SubscribeEventsParams, UnsubscribeEventsParams,
@@ -50,8 +44,8 @@ use crate::v_2026_07_28::wire::resources::{
 use crate::v_2026_07_28::wire::subscriptions::SubscriptionsListenParams;
 use crate::v_2026_07_28::wire::tools::{ToolCallParams, ToolsListParams};
 
-/// Route a parsed [`ClientMessage`] to the modern
-/// [`ProtocolOperation`] variant.
+/// Route a parsed [`ClientMessage`] to its [`ProtocolOperation`]
+/// variant.
 ///
 /// `Err(ProtocolError)` for: unsupported JSON-RPC version, missing /
 /// invalid params on methods that require them, and unknown methods.
@@ -62,108 +56,115 @@ pub fn map_client_message_to_operation(
     message: ClientMessage,
 ) -> Result<ProtocolOperation, ProtocolError> {
     match message {
-        ClientMessage::Request(request) => {
-            if request.jsonrpc != JSONRPC_VERSION {
+        ClientMessage::Request(JsonRpcRequest {
+            jsonrpc,
+            id,
+            method,
+            params,
+        }) => {
+            if jsonrpc != JSONRPC_VERSION {
                 return Err(ProtocolError::invalid_request(
                     "unsupported jsonrpc version",
                 ));
             }
 
-            match request.method.as_str() {
+            // Each arm moves `params` into its typed struct; nothing reads
+            // the request after.
+            match method.as_str() {
                 "server/discover" => {
                     let params: DiscoverParams =
-                        shared_routing::required_params(&request, "server/discover")?;
+                        shared_routing::required_params(params, &id, "server/discover")?;
                     Ok(ProtocolOperation::Lifecycle(LifecycleOperation::Discover {
-                        request_id: request.id,
+                        request_id: id,
                         params,
                     }))
                 }
                 "tools/list" => {
                     let params: ToolsListParams =
-                        shared_routing::optional_params(&request, "tools/list")?;
+                        shared_routing::optional_params(params, &id, "tools/list")?;
                     Ok(ProtocolOperation::Capabilities(
                         CapabilityOperation::ToolsList {
-                            request_id: request.id,
+                            request_id: id,
                             params,
                         },
                     ))
                 }
                 "tools/call" => {
                     let params: ToolCallParams =
-                        shared_routing::required_params(&request, "tools/call")?;
+                        shared_routing::required_params(params, &id, "tools/call")?;
                     Ok(ProtocolOperation::Capabilities(
                         CapabilityOperation::ToolsCall {
-                            request_id: request.id,
+                            request_id: id,
                             params,
                         },
                     ))
                 }
                 "prompts/list" => {
                     let params: PromptsListParams =
-                        shared_routing::optional_params(&request, "prompts/list")?;
+                        shared_routing::optional_params(params, &id, "prompts/list")?;
                     Ok(ProtocolOperation::Capabilities(
                         CapabilityOperation::PromptsList {
-                            request_id: request.id,
+                            request_id: id,
                             params,
                         },
                     ))
                 }
                 "prompts/get" => {
                     let params: PromptGetParams =
-                        shared_routing::required_params(&request, "prompts/get")?;
+                        shared_routing::required_params(params, &id, "prompts/get")?;
                     Ok(ProtocolOperation::Capabilities(
                         CapabilityOperation::PromptsGet {
-                            request_id: request.id,
+                            request_id: id,
                             params,
                         },
                     ))
                 }
                 "resources/list" => {
                     let params: ResourcesListParams =
-                        shared_routing::optional_params(&request, "resources/list")?;
+                        shared_routing::optional_params(params, &id, "resources/list")?;
                     Ok(ProtocolOperation::Capabilities(
                         CapabilityOperation::ResourcesList {
-                            request_id: request.id,
+                            request_id: id,
                             params,
                         },
                     ))
                 }
                 "resources/read" => {
                     let params: ResourceReadParams =
-                        shared_routing::required_params(&request, "resources/read")?;
+                        shared_routing::required_params(params, &id, "resources/read")?;
                     Ok(ProtocolOperation::Capabilities(
                         CapabilityOperation::ResourcesRead {
-                            request_id: request.id,
+                            request_id: id,
                             params,
                         },
                     ))
                 }
                 "resources/templates/list" => {
                     let params: ResourceTemplatesListParams =
-                        shared_routing::optional_params(&request, "resources/templates/list")?;
+                        shared_routing::optional_params(params, &id, "resources/templates/list")?;
                     Ok(ProtocolOperation::Capabilities(
                         CapabilityOperation::ResourcesTemplatesList {
-                            request_id: request.id,
+                            request_id: id,
                             params,
                         },
                     ))
                 }
                 "completion/complete" => {
                     let params: CompletionCompleteParams =
-                        shared_routing::required_params(&request, "completion/complete")?;
+                        shared_routing::required_params(params, &id, "completion/complete")?;
                     Ok(ProtocolOperation::Capabilities(
                         CapabilityOperation::Complete {
-                            request_id: request.id,
+                            request_id: id,
                             params,
                         },
                     ))
                 }
                 "subscriptions/listen" => {
                     let params: SubscriptionsListenParams =
-                        shared_routing::required_params(&request, "subscriptions/listen")?;
+                        shared_routing::required_params(params, &id, "subscriptions/listen")?;
                     Ok(ProtocolOperation::Capabilities(
                         CapabilityOperation::SubscriptionsListen {
-                            request_id: request.id,
+                            request_id: id,
                             params,
                         },
                     ))
@@ -171,32 +172,32 @@ pub fn map_client_message_to_operation(
                 // SEP-2663 tasks-extension methods (bare). There is
                 // no `createTask` — tasks materialize server-side
                 // during `tools/call`.
-                method if method == METHOD_GET_TASK => {
+                METHOD_GET_TASK => {
                     let params: GetTaskParams =
-                        shared_routing::required_params(&request, "subscriptions/listen")?;
+                        shared_routing::required_params(params, &id, METHOD_GET_TASK)?;
                     Ok(ProtocolOperation::TasksExtension(
                         TasksExtensionOperation::GetTask {
-                            request_id: request.id,
+                            request_id: id,
                             params,
                         },
                     ))
                 }
-                method if method == METHOD_CANCEL_TASK => {
+                METHOD_CANCEL_TASK => {
                     let params: CancelTaskParams =
-                        shared_routing::required_params(&request, "subscriptions/listen")?;
+                        shared_routing::required_params(params, &id, METHOD_CANCEL_TASK)?;
                     Ok(ProtocolOperation::TasksExtension(
                         TasksExtensionOperation::CancelTask {
-                            request_id: request.id,
+                            request_id: id,
                             params,
                         },
                     ))
                 }
-                method if method == METHOD_UPDATE_TASK => {
+                METHOD_UPDATE_TASK => {
                     let params: UpdateTaskParams =
-                        shared_routing::required_params(&request, "subscriptions/listen")?;
+                        shared_routing::required_params(params, &id, METHOD_UPDATE_TASK)?;
                     Ok(ProtocolOperation::TasksExtension(
                         TasksExtensionOperation::UpdateTask {
-                            request_id: request.id,
+                            request_id: id,
                             params,
                         },
                     ))
@@ -208,30 +209,33 @@ pub fn map_client_message_to_operation(
                 // become an operation too and the dispatcher picks the error.
                 METHOD_LIST_EVENTS => Ok(events_operation(
                     shared_routing::optional_params::<ListEventsParams>(
-                        &request,
+                        params,
+                        &id,
                         METHOD_LIST_EVENTS,
                     ),
-                    request.id,
+                    id,
                     METHOD_LIST_EVENTS,
                     |request_id, params| EventsExtensionOperation::List { request_id, params },
                 )),
                 METHOD_SUBSCRIBE_EVENTS => Ok(events_operation(
                     redacted_params(
-                        &request,
+                        params,
+                        &id,
                         METHOD_SUBSCRIBE_EVENTS,
                         SubscribeEventsParams::from_value_redacted,
                     ),
-                    request.id,
+                    id,
                     METHOD_SUBSCRIBE_EVENTS,
                     |request_id, params| EventsExtensionOperation::Subscribe { request_id, params },
                 )),
                 METHOD_UNSUBSCRIBE_EVENTS => Ok(events_operation(
                     redacted_params(
-                        &request,
+                        params,
+                        &id,
                         METHOD_UNSUBSCRIBE_EVENTS,
                         UnsubscribeEventsParams::from_value_redacted,
                     ),
-                    request.id,
+                    id,
                     METHOD_UNSUBSCRIBE_EVENTS,
                     |request_id, params| EventsExtensionOperation::Unsubscribe {
                         request_id,
@@ -240,10 +244,11 @@ pub fn map_client_message_to_operation(
                 )),
                 METHOD_POLL_EVENTS => Ok(events_operation(
                     shared_routing::required_params::<PollEventsParams>(
-                        &request,
+                        params,
+                        &id,
                         METHOD_POLL_EVENTS,
                     ),
-                    request.id,
+                    id,
                     METHOD_POLL_EVENTS,
                     |request_id, params| EventsExtensionOperation::Poll { request_id, params },
                 )),
@@ -251,10 +256,10 @@ pub fn map_client_message_to_operation(
                 // dispatcher decides whether they are served.
                 method if crate::shared::skills::is_skills_method(method) => {
                     Ok(ProtocolOperation::SkillsExtension(
-                        crate::shared::skills::route_request(&request),
+                        crate::shared::skills::route_request(id, method, params),
                     ))
                 }
-                method => Err(ProtocolError::method_not_found(Some(request.id), method)),
+                method => Err(ProtocolError::method_not_found(Some(id), method)),
             }
         }
         ClientMessage::Notification(notification) => {
@@ -289,13 +294,8 @@ pub fn map_client_message_to_operation(
                         ))
                     }
                 },
-                // The modern revision does NOT carry
-                // `notifications/initialized`, `notifications/elicitation/complete`,
-                // or `notifications/roots/list_changed` (logging
-                // / roots / sampling are deprecated; elicitation
-                // completion flows through MRTR). Anything else
-                // namespaced under `notifications/` is logged at
-                // WARN; everything else at DEBUG. Both succeed
+                // Anything namespaced under `notifications/` is logged
+                // at WARN; everything else at DEBUG. Both succeed
                 // because the spec forbids errors on unknown
                 // notifications.
                 _method => {
@@ -320,11 +320,9 @@ pub fn map_client_message_to_operation(
             }
         }
         ClientMessage::Response(_response) => {
-            // MRTR resumption flows through the request body's
-            // `_meta.io.modelcontextprotocol/inputResponses` map,
-            // NOT through a separate `Response` envelope. A
-            // standalone JSON-RPC response on the modern wire
-            // means the client confused itself with the server.
+            // MRTR answers travel as `params.inputResponses` on a
+            // retried request, never as a `Response` envelope, so a
+            // client-sent JSON-RPC response is always a client error.
             Err(ProtocolError::invalid_request(
                 "2026-07-28 does not accept client-side JSON-RPC responses; \
                  MRTR resumption rides on the request body",
@@ -356,20 +354,17 @@ fn events_operation<T>(
 /// `parse` reports failures without quoting any request value, so the
 /// `-32602` message cannot echo the secret.
 fn redacted_params<T>(
-    request: &crate::shared::jsonrpc::JsonRpcRequest,
+    params: Option<serde_json::Value>,
+    id: &serde_json::Value,
     method: &str,
     parse: fn(serde_json::Value) -> Result<T, String>,
 ) -> Result<T, ProtocolError> {
-    let params = request.params.clone().ok_or_else(|| {
-        ProtocolError::invalid_params(
-            Some(request.id.clone()),
-            format!("missing {method} params"),
-            None,
-        )
+    let params = params.ok_or_else(|| {
+        ProtocolError::invalid_params(Some(id.clone()), format!("missing {method} params"), None)
     })?;
     parse(params).map_err(|reason| {
         ProtocolError::invalid_params(
-            Some(request.id.clone()),
+            Some(id.clone()),
             format!("invalid {method} params: {reason}"),
             None,
         )
@@ -518,11 +513,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_methods_rejected_with_method_not_found() {
-        // The modern handler must reject every method that the
-        // modern wire deliberately doesn't carry. This is a guard
-        // against the registry accidentally routing legacy
-        // requests to the modern handler.
+    fn methods_outside_the_revision_are_method_not_found() {
+        // A method this revision does not define must never reach a
+        // dispatch arm.
         for method in [
             "initialize",
             "ping",
@@ -531,12 +524,6 @@ mod tests {
             "resources/unsubscribe",
             "tasks/result",
             "tasks/list",
-            // No legacy methods left to surface in this test —
-            // every Phase-3+ wired surface is now reachable on
-            // the modern wire. The tasks-extension methods route
-            // via the `io.modelcontextprotocol/tasks/*` namespace
-            // and are tested separately in 5.C's namespaced
-            // routing coverage.
         ] {
             let msg = ClientMessage::Request(JsonRpcRequest {
                 jsonrpc: JSONRPC_VERSION.to_owned(),
@@ -585,13 +572,12 @@ mod tests {
 
     #[test]
     fn unknown_notification_accepted_silently() {
-        // The modern revision drops `notifications/initialized` and
-        // `notifications/roots/list_changed`. They MUST still parse
-        // as `NotificationAccepted` — the spec forbids erroring on
-        // unknown notifications.
+        // A notification without a handler parses as
+        // `NotificationAccepted`: the spec forbids erroring on unknown
+        // notifications.
         for method in [
-            "notifications/initialized",
             "notifications/roots/list_changed",
+            "notifications/vendor/unknown",
             "vendor/unknown",
         ] {
             let msg = ClientMessage::Notification(JsonRpcNotification {
@@ -608,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn client_response_is_rejected_under_modern_wire() {
+    fn a_client_response_is_rejected() {
         let msg = ClientMessage::Response(JsonRpcResponse {
             jsonrpc: JSONRPC_VERSION.to_owned(),
             id: json!("srv-1"),
@@ -818,25 +804,9 @@ mod tests {
     }
 
     #[test]
-    fn events_methods_do_not_exist_on_the_legacy_wire() {
-        for method in [
-            "events/list",
-            "events/subscribe",
-            "events/unsubscribe",
-            "events/poll",
-            "events/stream",
-        ] {
-            let msg = request(method, Some(json!({ "name": "x" })));
-            let err = crate::v_2025_11_25::wire::routing::map_client_message_to_operation(msg)
-                .unwrap_err();
-            assert_eq!(err.code(), -32601, "{method}");
-        }
-    }
-
-    #[test]
-    fn legacy_createtask_method_is_not_routed() {
-        // `createTask` no longer exists on the modern wire; it falls
-        // through to method-not-found.
+    fn create_task_method_is_not_routed() {
+        // Task creation is server-directed (SEP-2663); a client
+        // `createTask` is method-not-found.
         let msg = ClientMessage::Request(JsonRpcRequest {
             jsonrpc: JSONRPC_VERSION.to_owned(),
             id: json!(1),

@@ -1,25 +1,26 @@
-//! Modern per-request `_meta` namespace types for MCP revision `2026-07-28`.
+//! Per-request `_meta` namespace types for MCP revision `2026-07-28`.
 //!
-//! The stateless modern revision (SEP-2575 + SEP-2567) cannot rely
-//! on session-scoped capability negotiation for per-request hints —
-//! every request stands on its own. The spec consolidates these
-//! hints under the reserved
+//! The revision is stateless (SEP-2575 + SEP-2567): every request
+//! stands on its own. The spec consolidates per-request hints under
+//! the reserved
 //! [`META_NAMESPACE`](crate::v_2026_07_28::wire::meta::META_NAMESPACE)
 //! prefix, so a single `_meta` object on any request body can carry:
 //!
+//! - the client's identity triple (protocol version, client info,
+//!   client capabilities),
 //! - trace context propagation (W3C `traceparent` / `tracestate`),
 //! - progress tracking (`progressToken`),
-//! - per-request log level (replaces the deprecated `logging/setLevel`
-//!   subscribe-per-session model — SEP-2577),
+//! - a per-request log level (SEP-2577),
 //! - SEP-2549 cache validation tokens,
 //! - SEP-2567 context-preservation hints (the client tells the
 //!   server "associate this request with the result of request X"),
 //! - per-request idempotency keys,
 //! - task correlation (`related-task`).
 //!
-//! MRTR's `requestState` and `inputResponses` keys live in
-//! `v_2026_07_28/wire/mrtr.rs`; the tasks-extension keys
-//! ship under `v_2026_07_28/extensions/tasks/wire.rs`.
+//! MRTR's `requestState` and `inputResponses` are top-level params,
+//! not `_meta` keys (`v_2026_07_28/wire/mrtr.rs`); the
+//! tasks-extension keys ship under
+//! `v_2026_07_28/extensions/tasks/wire.rs`.
 //!
 //! Dispatch reads the individual keys it needs directly off the raw
 //! `_meta` object by the `META_KEY_*` constants below. The body
@@ -36,17 +37,15 @@ use serde::{Deserialize, Serialize};
 /// Vendor extensions MUST use a different prefix.
 pub const META_NAMESPACE: &str = "io.modelcontextprotocol";
 
-/// SEP-2575 per-request protocol version. The stateless wire removes
-/// the `initialize` handshake, so every request self-identifies the
-/// revision the client is speaking via this key.
+/// SEP-2575 per-request protocol version. The wire has no handshake,
+/// so every request self-identifies the revision the client is
+/// speaking via this key.
 pub const META_KEY_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
 
-/// SEP-2575 per-request client identity (`{name, title?, version, …}`),
-/// replacing the `initialize`-time `clientInfo`.
+/// SEP-2575 per-request client identity (`{name, title?, version, …}`).
 pub const META_KEY_CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
 
-/// SEP-2575 per-request client capability advertisement, replacing the
-/// `initialize`-time `clientCapabilities`.
+/// SEP-2575 per-request client capability advertisement.
 pub const META_KEY_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
 
 /// W3C trace-parent header propagation key.
@@ -56,8 +55,8 @@ pub const META_KEY_TRACEPARENT: &str = "io.modelcontextprotocol/traceparent";
 /// `notifications/progress` events.
 pub const META_KEY_PROGRESS_TOKEN: &str = "io.modelcontextprotocol/progressToken";
 
-/// Per-request log level. Replaces the legacy
-/// `logging/setLevel` subscribe-per-session model.
+/// Per-request log level: the floor below which the server emits no
+/// `notifications/message` for this request.
 pub const META_KEY_LOG_LEVEL: &str = "io.modelcontextprotocol/logLevel";
 
 /// SEP-2549 cache-validation token. Carried by clients on subsequent
@@ -78,10 +77,9 @@ pub const META_KEY_PRESERVE_CONTEXT: &str = "io.modelcontextprotocol/preserveCon
 // Typed payload shapes for keys with non-scalar values.
 // ---------------------------------------------------------------------------
 
-/// Severity hint for [`RequestMeta::log_level`]. Same eight RFC-5424
-/// levels the legacy `logging/setLevel` accepted, ordered so a more
-/// permissive level (lower in the table) compares less-than a less
-/// permissive one.
+/// Severity carried by [`META_KEY_LOG_LEVEL`]: the eight RFC-5424
+/// levels, ordered so a more permissive level (lower in the table)
+/// compares less-than a less permissive one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {

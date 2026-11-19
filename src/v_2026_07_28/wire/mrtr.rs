@@ -1,10 +1,8 @@
 //! Multi Round-Trip Requests (MRTR) wire types — SEP-2322.
 //!
-//! MRTR replaces the legacy SSE-based suspension flow with an
-//! **inline body** mechanism. When a `tools/call` (or any other
-//! method whose dispatch can pause for user / model input)
-//! suspends, the server returns an [`InputRequiredResult`] as the
-//! `result` of the JSON-RPC response:
+//! When a `tools/call` (or any other method whose dispatch can pause
+//! for user / model input) suspends, the server returns an
+//! [`InputRequiredResult`] as the `result` of the JSON-RPC response:
 //!
 //! ```text
 //! {
@@ -15,7 +13,7 @@
 //!     "requestState": "<opaque encoded blob or handle>",
 //!     "inputRequests": {
 //!       "<correlation-token>": {
-//!         "type": "elicitation" | "sampling" | "roots",
+//!         "method": "elicitation/create" | "sampling/createMessage" | "roots/list",
 //!         "params": { ... }
 //!       },
 //!       ...
@@ -26,8 +24,8 @@
 //! ```
 //!
 //! The client fulfils each request and re-issues the same
-//! `tools/call` with the answers tucked into `_meta` under the
-//! reserved `io.modelcontextprotocol/inputResponses` key, plus the
+//! `tools/call` with its answers in the top-level `inputResponses`
+//! param, keyed by the same correlation tokens, plus the
 //! server-minted `requestState` echoed back so the server can
 //! resume:
 //!
@@ -37,29 +35,21 @@
 //!   "params": {
 //!     "name": "<tool>",
 //!     "arguments": { ... },
-//!     "_meta": {
-//!       "io.modelcontextprotocol/requestState": "<echoed blob/handle>",
-//!       "io.modelcontextprotocol/inputResponses": {
-//!         "<correlation-token>": <answer value>
-//!       }
+//!     "requestState": "<echoed blob/handle>",
+//!     "inputResponses": {
+//!       "<correlation-token>": <answer value>
 //!     }
 //!   }
 //! }
 //! ```
 //!
-//! **Differences from legacy 2025-11-25:**
-//!
-//! - **No SSE round-trip.** The legacy flow returned `HTTP 202
-//!   NotificationAccepted` + put a `ServerJsonRpcRequest` on the
-//!   session's SSE delivery bus; the client then sent the
-//!   response back as a `ClientMessage::Response`. MRTR is all in
-//!   the request/response body — no stateful delivery bus, no
-//!   stream coordination.
-//! - **Multiple input requests in flight.** The legacy flow could
-//!   only carry a single suspension per dispatch; MRTR's
-//!   `inputRequests` is a map, so the server can request several
-//!   things at once (e.g., an elicitation AND a sampling) and the
-//!   client returns answers keyed by the same correlation tokens.
+//! - **All in the body.** The suspension and its answers travel in the
+//!   request/response bodies: no server-held stream, no client-sent
+//!   JSON-RPC response.
+//! - **Several input requests at once.** `inputRequests` is a map, so
+//!   the server can ask for several things at once (e.g., an
+//!   elicitation AND a sampling) and the client answers each by its
+//!   correlation token.
 //! - **Server-opaque state.** Pipeline state rides in
 //!   `requestState`, a server-chosen encoding (encrypted inline
 //!   for small payloads, KV-store handle for large ones — see
@@ -73,19 +63,6 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-// ---------------------------------------------------------------------------
-// Well-known `_meta` keys.
-// ---------------------------------------------------------------------------
-
-/// `_meta` key the **server** stamps onto `InputRequiredResult`
-/// (already inside the `requestState` field on the result) and the
-/// **client** echoes back on the resumption request body.
-pub const META_KEY_REQUEST_STATE: &str = "io.modelcontextprotocol/requestState";
-
-/// `_meta` key the **client** uses on the resumption request body
-/// to carry its answers to the prior `InputRequiredResult`.
-pub const META_KEY_INPUT_RESPONSES: &str = "io.modelcontextprotocol/inputResponses";
 
 // ---------------------------------------------------------------------------
 // `InputRequiredResult` — the suspended-tools-call result body.
@@ -111,17 +88,16 @@ pub struct InputRequiredResult {
     #[serde(default = "default_result_type_input_required")]
     pub result_type: String,
     /// Opaque server-encoded pipeline state. The client echoes
-    /// this back verbatim in the resumption request's
-    /// `_meta.io.modelcontextprotocol/requestState`; the server
-    /// decodes it to pick up where it left off. Format is
-    /// server-chosen (encrypted inline ≤ 8 KiB or KV-store handle
-    /// above — see the `dispatch::request_state` codec).
+    /// this back verbatim in the resumption request's top-level
+    /// `requestState` param; the server decodes it to pick up where
+    /// it left off. Format is server-chosen (encrypted inline
+    /// ≤ 8 KiB or KV-store handle above — see the
+    /// `dispatch::request_state` codec).
     pub request_state: String,
     /// Map of correlation token → input request. Keys are
     /// server-chosen (e.g., random UUID); the client uses the
-    /// same key in
-    /// `_meta.io.modelcontextprotocol/inputResponses` to associate
-    /// each answer with its request.
+    /// same key in the resumption request's `inputResponses` param
+    /// to associate each answer with its request.
     pub input_requests: BTreeMap<String, InputRequest>,
     /// Optional human-readable hint clients MAY surface to the
     /// user (e.g., "The tool needs your confirmation to proceed").
@@ -163,26 +139,23 @@ impl InputRequiredResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method")]
 pub enum InputRequest {
-    /// Equivalent of legacy `elicitation/create` — server asks the
-    /// client to collect user input (form or URL flow).
+    /// `elicitation/create` — server asks the client to collect user
+    /// input (form or URL flow).
     #[serde(rename = "elicitation/create")]
     Elicitation {
-        /// Pre-built params object the server would have sent as
-        /// the `params` of `elicitation/create` on the legacy wire.
+        /// The `elicitation/create` params object.
         params: Value,
     },
-    /// Equivalent of legacy `sampling/createMessage` — server asks
-    /// the client to run an LLM completion.
+    /// `sampling/createMessage` — server asks the client to run an
+    /// LLM completion.
     #[serde(rename = "sampling/createMessage")]
     Sampling {
-        /// Pre-built params object equivalent to
-        /// `sampling/createMessage`'s body.
+        /// The `sampling/createMessage` params object.
         params: Value,
     },
-    /// Equivalent of legacy `roots/list` — server asks the client
-    /// for its declared roots. SEP-2577 deprecated roots with a
-    /// 12-month sunset; modern servers SHOULD avoid emitting this
-    /// after the runway ends.
+    /// `roots/list` — server asks the client for its declared roots.
+    /// SEP-2577 deprecates roots with a 12-month sunset; servers
+    /// SHOULD avoid emitting this after the runway ends.
     #[serde(rename = "roots/list")]
     Roots {
         /// Typically `{}` (no params); kept as `Value` for
@@ -196,8 +169,8 @@ pub enum InputRequest {
 // `InputResponses` parsing helper.
 // ---------------------------------------------------------------------------
 
-/// Typed view over the client-supplied `_meta.io.modelcontextprotocol/
-/// inputResponses` map. Each entry is keyed by the same correlation
+/// Typed view over the client-supplied `inputResponses` param. Each
+/// entry is keyed by the same correlation
 /// token the server emitted in `InputRequiredResult.inputRequests`;
 /// the value is either the answer payload (`Ok`) or an explicit
 /// `Err` envelope when the client could not fulfil the request
@@ -237,10 +210,9 @@ pub struct InputResponseError {
 }
 
 impl InputResponses {
-    /// Parse a raw `_meta.io.modelcontextprotocol/inputResponses`
-    /// JSON object into the typed view. Returns
-    /// `Ok(InputResponses { entries: empty })` when the input is
-    /// `null` or missing; returns `Err` when the shape is wrong
+    /// Parse a raw `inputResponses` JSON object into the typed view.
+    /// Returns `Ok(InputResponses { entries: empty })` when the input
+    /// is `null` or missing; returns `Err` when the shape is wrong
     /// (e.g., the field is not a JSON object).
     pub fn from_value(value: &Value) -> Result<Self, String> {
         if value.is_null() {
@@ -248,14 +220,14 @@ impl InputResponses {
         }
         let Some(obj) = value.as_object() else {
             return Err(format!(
-                "{META_KEY_INPUT_RESPONSES} must be a JSON object, got: {}",
+                "inputResponses must be a JSON object, got: {}",
                 value_kind(value)
             ));
         };
         let mut entries: BTreeMap<String, InputResponseValue> = BTreeMap::new();
         for (key, val) in obj {
             let parsed: InputResponseValue = serde_json::from_value(val.clone())
-                .map_err(|e| format!("invalid {META_KEY_INPUT_RESPONSES}[{key}]: {e}"))?;
+                .map_err(|e| format!("invalid inputResponses[{key}]: {e}"))?;
             entries.insert(key.clone(), parsed);
         }
         Ok(Self { entries })
@@ -279,15 +251,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn well_known_meta_keys_match_spec() {
-        assert_eq!(
-            META_KEY_REQUEST_STATE,
-            "io.modelcontextprotocol/requestState"
-        );
-        assert_eq!(
-            META_KEY_INPUT_RESPONSES,
-            "io.modelcontextprotocol/inputResponses"
-        );
+    fn result_type_matches_spec() {
         assert_eq!(RESULT_TYPE_INPUT_REQUIRED, "input_required");
     }
 

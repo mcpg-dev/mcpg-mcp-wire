@@ -1,26 +1,63 @@
-//! Sampling wire types for MCP revision `2025-11-25`.
+//! Requests a server needs the client to fulfil: `elicitation/create`,
+//! `sampling/createMessage` and `roots/list`.
 //!
-//! `sampling/createMessage` is the server-initiated path where the
-//! server asks the client to run an LLM completion on its behalf.
-//! The client has full discretion over which model is used and
-//! whether to surface the request to the user.
-//!
-//! ## Modern counterpart
-//!
-//! Like elicitation, sampling is an `inputRequests` map entry inside MRTR
-//! (`InputRequiredResult`, SEP-2322) on `2026-07-28` rather than a standalone
-//! server-initiated request. SEP-2577 additionally deprecates the sampling
-//! primitive with a 12-month sunset. The shapes here are frozen for the
-//! `2025-11-25` compatibility window.
-//!
-//! The `DEFAULT_SAMPLING_MAX_TOKENS` constant
-//! (substituted into pipeline-emitted sampling steps that omit
-//! `maxTokens`) lives at the version's `wire/mod.rs` root.
+//! The pipeline engine builds each one as a [`ServerJsonRpcRequest`]
+//! carrying an [`ElicitationCreateParams`] or
+//! [`SamplingCreateMessageParams`] body. MRTR (SEP-2322) renders every
+//! such request as one `inputRequests` entry of an
+//! [`InputRequiredResult`](crate::v_2026_07_28::wire::mrtr::InputRequiredResult),
+//! keyed by the request's `id`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::shared::content::{ContentAnnotations, ToolContent};
+
+/// `sampling/createMessage.maxTokens` is required. Substituted when an
+/// operator omits it from a pipeline sampling step.
+pub const DEFAULT_SAMPLING_MAX_TOKENS: u64 = 4096;
+
+/// A request the server needs the client to fulfil. `id` is the
+/// correlation token of the request's `inputRequests` entry.
+#[derive(Debug, Clone, Serialize)]
+pub struct ServerJsonRpcRequest {
+    pub jsonrpc: &'static str,
+    pub id: Value,
+    pub method: String,
+    pub params: Value,
+}
+
+/// `elicitation/create` parameters.
+///
+/// The `mode` field determines which sibling fields are required:
+///
+/// - `mode: "form"` → `requestedSchema` (required)
+/// - `mode: "url"` → `elicitationId` (required), `url` (required)
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElicitationCreateParams {
+    /// Elicitation mode: `"form"` or `"url"`.
+    pub mode: String,
+    pub message: String,
+    /// Form mode: a JSON Schema describing the requested input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_schema: Option<Value>,
+    /// URL mode: unique identifier of this elicitation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elicitation_id: Option<String>,
+    /// URL mode: URL the client should navigate the user to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Task metadata, when the request belongs to a task.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<Value>,
+    /// Hint for how to present the elicitation: `"inline"`,
+    /// `"popup"`, or `"newWindow"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presentation_hint: Option<String>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
 
 /// Sampling context-inclusion hint. MCP defines exactly three
 /// variants; any other value on the wire fails deserialization so a
@@ -37,17 +74,14 @@ pub enum SamplingIncludeContext {
     AllServers,
 }
 
-/// Server-to-client sampling request parameters per MCP 2025-11-25.
-/// All fields except `messages` and `maxTokens` are optional hints
-/// from the server.
+/// `sampling/createMessage` parameters. All fields except `messages`
+/// and `maxTokens` are optional hints from the server.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SamplingCreateMessageParams {
     pub messages: Vec<SamplingMessage>,
-    /// MCP 2025-11-25 §Sampling: `maxTokens` is REQUIRED.
-    /// Operators that omit it from a pipeline sampling step receive
-    /// `DEFAULT_SAMPLING_MAX_TOKENS` (re-exported from the version
-    /// root) so the wire envelope is always spec-compliant.
+    /// Required on the wire; a pipeline sampling step that omits it
+    /// sends [`DEFAULT_SAMPLING_MAX_TOKENS`].
     pub max_tokens: u64,
     /// Model preferences ordered by priority.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,9 +89,8 @@ pub struct SamplingCreateMessageParams {
     /// System prompt to inject.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
-    /// Context inclusion hint. Narrowed from
-    /// `Option<String>` to a typed enum so unknown values fail
-    /// deserialization instead of silently masquerading as "none".
+    /// Context inclusion hint. A typed enum, so an unknown value fails
+    /// deserialization instead of passing as "none".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include_context: Option<SamplingIncludeContext>,
     /// Temperature (0.0 to 1.0).
@@ -76,7 +109,7 @@ pub struct SamplingCreateMessageParams {
     /// `{"type": "tool", "name": "..."}`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<Value>,
-    /// Task ID if this sampling is associated with a running task.
+    /// Task metadata, when the request belongs to a task.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task: Option<Value>,
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
@@ -151,21 +184,12 @@ pub enum SamplingMessageContent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v_2025_11_25::wire::DEFAULT_SAMPLING_MAX_TOKENS;
     use serde_json::json;
 
-    #[test]
-    fn sampling_create_message_params_serialize() {
-        let params = SamplingCreateMessageParams {
-            messages: vec![SamplingMessage {
-                role: "user".to_owned(),
-                content: SamplingMessageContent::Text {
-                    text: "Summarize this data".to_owned(),
-                    annotations: None,
-                },
-                meta: None,
-            }],
-            max_tokens: 512,
+    fn sampling_params(max_tokens: u64) -> SamplingCreateMessageParams {
+        SamplingCreateMessageParams {
+            messages: vec![],
+            max_tokens,
             model_preferences: None,
             system_prompt: None,
             include_context: None,
@@ -176,9 +200,86 @@ mod tests {
             tool_choice: None,
             task: None,
             meta: None,
+        }
+    }
+
+    #[test]
+    fn server_jsonrpc_request_serializes() {
+        let request = ServerJsonRpcRequest {
+            jsonrpc: "2.0",
+            id: Value::String("srv-req-1".to_owned()),
+            method: "elicitation/create".to_owned(),
+            params: json!({ "message": "Do you confirm?" }),
+        };
+        let v = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            v,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "srv-req-1",
+                "method": "elicitation/create",
+                "params": { "message": "Do you confirm?" }
+            })
+        );
+    }
+
+    #[test]
+    fn elicitation_params_form_mode_serializes() {
+        let params = ElicitationCreateParams {
+            mode: "form".to_owned(),
+            message: "Confirm deployment?".to_owned(),
+            requested_schema: Some(json!({
+                "type": "object",
+                "properties": { "confirm": { "type": "boolean" } },
+            })),
+            elicitation_id: None,
+            url: None,
+            task: None,
+            presentation_hint: None,
+            meta: None,
         };
         let v = serde_json::to_value(&params).unwrap();
+        assert_eq!(v["mode"], "form");
+        assert_eq!(v["message"], "Confirm deployment?");
+        assert!(v["requestedSchema"].is_object());
+        assert!(v.get("url").is_none());
+        assert!(v.get("elicitationId").is_none());
+    }
+
+    #[test]
+    fn elicitation_params_url_mode_serializes() {
+        let params = ElicitationCreateParams {
+            mode: "url".to_owned(),
+            message: "Complete auth".to_owned(),
+            requested_schema: None,
+            elicitation_id: Some("elic-123".to_owned()),
+            url: Some("https://auth.example.com/flow".to_owned()),
+            task: None,
+            presentation_hint: Some("popup".to_owned()),
+            meta: None,
+        };
+        let v = serde_json::to_value(&params).unwrap();
+        assert_eq!(v["mode"], "url");
+        assert_eq!(v["elicitationId"], "elic-123");
+        assert_eq!(v["url"], "https://auth.example.com/flow");
+        assert_eq!(v["presentationHint"], "popup");
+        assert!(v.get("requestedSchema").is_none());
+    }
+
+    #[test]
+    fn sampling_create_message_params_serialize() {
+        let mut params = sampling_params(512);
+        params.messages = vec![SamplingMessage {
+            role: "user".to_owned(),
+            content: SamplingMessageContent::Text {
+                text: "Summarize this data".to_owned(),
+                annotations: None,
+            },
+            meta: None,
+        }];
+        let v = serde_json::to_value(&params).unwrap();
         assert_eq!(v["messages"][0]["role"], "user");
+        assert_eq!(v["messages"][0]["content"]["type"], "text");
         assert_eq!(v["maxTokens"], 512);
     }
 
@@ -206,36 +307,18 @@ mod tests {
         assert_eq!(v["stopSequences"][0], "STOP");
         assert!(v["tools"].is_array());
         assert_eq!(v["toolChoice"], "auto");
+        assert_eq!(v["task"]["taskId"], "t-1");
         assert!(v["_meta"]["custom"].as_bool().unwrap());
     }
 
-    /// `maxTokens` is REQUIRED on the wire — must always
-    /// serialise, even when set to the gateway's default.
+    /// `maxTokens` is required on the wire, so it always serializes,
+    /// even at the default.
     #[test]
     fn sampling_create_message_serializes_max_tokens() {
-        let p = SamplingCreateMessageParams {
-            messages: vec![],
-            max_tokens: DEFAULT_SAMPLING_MAX_TOKENS,
-            model_preferences: None,
-            system_prompt: None,
-            include_context: None,
-            temperature: None,
-            stop_sequences: None,
-            metadata: None,
-            tools: None,
-            tool_choice: None,
-            task: None,
-            meta: None,
-        };
-        let v = serde_json::to_value(&p).unwrap();
+        let v = serde_json::to_value(sampling_params(DEFAULT_SAMPLING_MAX_TOKENS)).unwrap();
         assert_eq!(v["maxTokens"], 4096);
     }
 
-    /// Spec-level invariant — content inside
-    /// `SamplingMessage::ToolResult` is restricted to text / image /
-    /// audio / resource / resource_link. The `ToolContent` enum
-    /// omits nested tool_use / tool_result, so a deserialized payload
-    /// carrying nested tool types must fail.
     #[test]
     fn sampling_tool_result_rejects_nested_tool_use() {
         let bad = json!({
@@ -247,9 +330,8 @@ mod tests {
         assert!(parsed.is_err(), "nested tool_use must not deserialize");
     }
 
-    /// Sanity-check the allowed content variants.
     #[test]
-    fn sampling_tool_result_accepts_text_image_audio_resource() {
+    fn sampling_tool_result_accepts_text_image_audio() {
         for variant in [
             json!({ "type": "text", "text": "hello" }),
             json!({ "type": "image", "data": "AA==", "mimeType": "image/png" }),
@@ -266,9 +348,17 @@ mod tests {
     }
 
     #[test]
-    fn sampling_include_context_rejects_unknown_value() {
-        let bad = json!("everywhere");
-        let parsed: Result<SamplingIncludeContext, _> = serde_json::from_value(bad);
+    fn sampling_include_context_round_trips_and_rejects_unknown_values() {
+        for (variant, wire) in [
+            (SamplingIncludeContext::None, "none"),
+            (SamplingIncludeContext::ThisServer, "thisServer"),
+            (SamplingIncludeContext::AllServers, "allServers"),
+        ] {
+            assert_eq!(serde_json::to_value(&variant).unwrap(), wire);
+            let back: SamplingIncludeContext = serde_json::from_value(json!(wire)).unwrap();
+            assert_eq!(back, variant);
+        }
+        let parsed: Result<SamplingIncludeContext, _> = serde_json::from_value(json!("everywhere"));
         assert!(parsed.is_err(), "unknown includeContext value must fail");
     }
 }

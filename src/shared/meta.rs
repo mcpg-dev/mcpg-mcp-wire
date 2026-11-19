@@ -57,9 +57,6 @@ const KNOWN_RESERVED_KEYS: &[&str] = &[
     "io.modelcontextprotocol/related-task",
     "io.modelcontextprotocol/idempotencyKey",
     "io.modelcontextprotocol/preserveContext",
-    // SEP-2322 MRTR resume channel.
-    "io.modelcontextprotocol/requestState",
-    "io.modelcontextprotocol/inputResponses",
     // SEP-2575 subscriptions/listen correlation.
     "io.modelcontextprotocol/subscriptionId",
     // Tasks extension (SEP-2663) model-immediate-response hint.
@@ -251,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn allows_legacy_dotted_bare_keys() {
+    fn allows_dotted_bare_keys() {
         // A key with no `/` carries no prefix → never reserved.
         validate_meta_keys(&json!({ "mcp.foo": "x" })).unwrap();
         validate_meta_keys(&json!({ "modelcontextprotocol.foo": "x" })).unwrap();
@@ -261,8 +258,8 @@ mod tests {
     #[test]
     fn allows_spec_defined_reserved_keys() {
         // The real SEP-2575 identity triple + the other spec-defined
-        // reserved keys are accepted — a compliant modern client MUST
-        // carry these.
+        // reserved keys are accepted — a compliant client MUST carry
+        // these.
         validate_meta_keys(&json!({
             "io.modelcontextprotocol/protocolVersion": "2026-07-28",
             "io.modelcontextprotocol/clientInfo": { "name": "c", "version": "1" },
@@ -272,6 +269,20 @@ mod tests {
             "io.modelcontextprotocol/logLevel": "info"
         }))
         .unwrap();
+    }
+
+    /// MRTR answers are top-level `requestState` / `inputResponses`
+    /// params; under `_meta` they are not spec-defined keys and are
+    /// refused rather than ignored.
+    #[test]
+    fn rejects_mrtr_resume_keys_under_meta() {
+        for key in [
+            "io.modelcontextprotocol/requestState",
+            "io.modelcontextprotocol/inputResponses",
+        ] {
+            let err = validate_meta_keys(&json!({ key: "x" })).unwrap_err();
+            assert!(err.message().contains("reserved"), "{key}");
+        }
     }
 
     // --- Descent into nested `_meta`. ---

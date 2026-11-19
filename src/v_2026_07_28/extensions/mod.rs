@@ -1,9 +1,8 @@
-//! SEP-2133 extension surfaces published by `mcpg` on the modern
-//! wire:
+//! SEP-2133 extension surfaces published by `mcpg`:
 //!
 //! - [`tasks`](crate::v_2026_07_28::extensions::tasks)
-//!   (SEP-2663) — the post-2025-11-25 home of the legacy core
-//!   `tasks/*` methods.
+//!   (SEP-2663) — long-running async work: `tasks/{get,update,cancel}`
+//!   and the `notifications/tasks` status notification.
 //! - [`apps`](crate::v_2026_07_28::extensions::apps)
 //!   (SEP-1865) — MCP Apps. No dispatch arm (the `ui/*` protocol is
 //!   host↔iframe over postMessage); only the typed `_meta.ui`

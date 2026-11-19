@@ -1,4 +1,4 @@
-//! Version-agnostic core of the SEP-1865 **MCP Apps** extension.
+//! Core of the SEP-1865 **MCP Apps** extension.
 //!
 //! MCP Apps lets a server attach an interactive HTML UI to a tool: the
 //! tool descriptor names a `ui://` resource, the host fetches it, and
@@ -10,7 +10,7 @@
 //! MCPG's job is:
 //!
 //! 1. carry `_meta.ui.*` on tool/resource descriptors and
-//!    `tools/call` results unchanged (both wire versions);
+//!    `tools/call` results unchanged;
 //! 2. advertise `io.modelcontextprotocol/ui` downstream (to clients)
 //!    and upstream (to federated servers, so they emit UI tools);
 //! 3. keep `_meta.ui.resourceUri` pointing at the `ui://` resource the
@@ -22,10 +22,10 @@
 //!    strip iframe permissions to an operator allow-list, on egress
 //!    ([`AppsPolicy::apply_to_resource_meta`]).
 //!
-//! This module owns the pieces that are identical across wire versions
-//! (constants, the `ui://` URI helpers, the policy engine, the
-//! capability-object builder) so the modern handler, the legacy
-//! runtime, and the federation engine all share one implementation.
+//! This module owns the shared pieces (constants, the `ui://` URI
+//! helpers, the policy engine, the capability-object builder) so the
+//! protocol handler, the runtime, and the federation engine all share
+//! one implementation.
 //!
 //! ## The one nuance that bites the typed-`_meta` code
 //!

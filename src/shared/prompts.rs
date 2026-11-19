@@ -1,20 +1,13 @@
-//! Prompts wire types for MCP revision `2025-11-25`.
+//! `prompts/get` params and result as the gateway runtime handles them.
 //!
 //! - [`PromptGetParams`] — body of a `prompts/get` request.
-//! - [`PromptsListResult`] — body of a `prompts/list` result.
-//! - [`PromptGetResult`] — body of a `prompts/get` result.
-//! - [`PromptMessage`] — one message in the rendered prompt output.
-//! - [`PromptMessageContent`] — the tagged-union content of a
-//!   single prompt message (per MCP 2025-11-25, a single
-//!   `ContentBlock`: Text | Image | Audio | ResourceLink | Resource).
-//!
-//! Operation-enum variants live in [`operations`](super::operations); the
-//! method-name → operation router lives in [`routing`](super::routing).
+//! - [`PromptGetResult`] — the rendered prompt.
+//! - [`PromptMessage`] + [`PromptMessageContent`] — one message of the
+//!   rendered prompt and its single content block.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::descriptors::PromptDescriptor;
 use crate::shared::content::{ContentAnnotations, EmbeddedResource, Icon};
 
 /// Parameters for `prompts/get`.
@@ -25,21 +18,6 @@ pub struct PromptGetParams {
     pub arguments: Option<Value>,
     #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>,
-}
-
-/// Result body for `prompts/list`.
-#[derive(Debug, Clone, Serialize)]
-pub struct PromptsListResult {
-    pub prompts: Vec<PromptDescriptor>,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "nextCursor")]
-    pub next_cursor: Option<String>,
-    /// SEP-2549 caching hints — see [`super::tools::ToolsListResult`].
-    #[serde(skip_serializing_if = "Option::is_none", rename = "ttlMs")]
-    pub ttl_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "cacheScope")]
-    pub cache_scope: Option<crate::shared::caching::CacheScope>,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "cacheToken")]
-    pub cache_token: Option<String>,
 }
 
 /// Result body for `prompts/get`.
@@ -57,11 +35,9 @@ pub struct PromptMessage {
     pub meta: Option<Value>,
 }
 
-/// Content block for prompt messages — per MCP 2025-11-25, this is a
-/// single `ContentBlock` (Text | Image | Audio | ResourceLink |
-/// EmbeddedResource). Distinct from [`ToolContent`] only insofar as
-/// the prompt-side enum has historically been defined separately;
-/// the wire shape is identical to the tool-result content set.
+/// Content block of a prompt message: a single `ContentBlock` (Text |
+/// Image | Audio | ResourceLink | EmbeddedResource). The wire shape is
+/// the tool-result content set ([`ToolContent`]).
 ///
 /// [`ToolContent`]: crate::shared::content::ToolContent
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,34 +89,21 @@ pub enum PromptMessageContent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn prompt_get_params_deserializes_meta() {
-        let json = serde_json::json!({ "name": "greet", "_meta": { "hint": true } });
-        let params: PromptGetParams = serde_json::from_value(json).unwrap();
+        let params: PromptGetParams =
+            serde_json::from_value(json!({ "name": "greet", "_meta": { "hint": true } })).unwrap();
         assert!(params.meta.is_some());
     }
 
     #[test]
     fn prompt_get_params_optional_arguments() {
-        let json = serde_json::json!({ "name": "greet" });
-        let params: PromptGetParams = serde_json::from_value(json).unwrap();
+        let params: PromptGetParams = serde_json::from_value(json!({ "name": "greet" })).unwrap();
         assert_eq!(params.name, "greet");
         assert!(params.arguments.is_none());
         assert!(params.meta.is_none());
-    }
-
-    #[test]
-    fn prompts_list_result_omits_null_cursor() {
-        let result = PromptsListResult {
-            prompts: vec![],
-            next_cursor: None,
-            ttl_ms: None,
-            cache_scope: None,
-            cache_token: None,
-        };
-        let json = serde_json::to_value(&result).unwrap();
-        assert!(json.get("nextCursor").is_none());
     }
 
     #[test]
@@ -150,16 +113,11 @@ mod tests {
             annotations: None,
         };
         let json = serde_json::to_value(&content).unwrap();
-        assert_eq!(json["type"], "text");
-        assert_eq!(json["text"], "hello");
+        assert_eq!(json, json!({ "type": "text", "text": "hello" }));
     }
 
     #[test]
     fn prompt_message_content_resource_link_uses_snake_case_tag() {
-        // The tag uses an explicit `#[serde(rename = "resource_link")]`
-        // because the default snake_case rename would be the same string
-        // anyway — but pinning this in a test guards against a future
-        // attr removal from drifting the wire tag.
         let content = PromptMessageContent::ResourceLink {
             uri: "https://example.com/x".to_owned(),
             name: "x".to_owned(),
@@ -172,5 +130,23 @@ mod tests {
         };
         let json = serde_json::to_value(&content).unwrap();
         assert_eq!(json["type"], "resource_link");
+    }
+
+    #[test]
+    fn prompt_get_result_serializes_messages() {
+        let result = PromptGetResult {
+            messages: vec![PromptMessage {
+                role: "user".to_owned(),
+                content: PromptMessageContent::Text {
+                    text: "hi".to_owned(),
+                    annotations: None,
+                },
+                meta: None,
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(&result).unwrap(),
+            json!({ "messages": [{ "role": "user", "content": { "type": "text", "text": "hi" } }] })
+        );
     }
 }

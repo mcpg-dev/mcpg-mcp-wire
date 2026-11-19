@@ -1,22 +1,21 @@
-//! MCP wire types for every protocol revision mcpg speaks.
+//! MCP wire types for protocol revision `2026-07-28`.
 //!
-//! Extracted from the gateway's `protocol` module so the gateway and
-//! the inspector share one set of frame definitions:
+//! The gateway serves with these types and the inspector dials with
+//! them, so the two share one set of frame definitions:
 //!
-//! - [`version`] — `ProtocolVersion` enum + parsing.
-//! - [`shared`] — version-agnostic primitives (JSON-RPC envelope,
-//!   content blocks, error codes, `_meta` rules, apps / caching /
-//!   deprecation surfaces).
+//! - [`shared`] — protocol primitives (JSON-RPC envelope, content
+//!   blocks, error codes, `_meta` rules, apps / caching / deprecation
+//!   surfaces, and the request / result shapes the gateway runtime
+//!   builds).
 //! - [`descriptors`] — the tool / prompt / resource descriptor shapes
-//!   the sessionful wire serializes directly.
-//! - `v_<date>` — per-revision wire modules ([`v_2025_11_25`],
-//!   [`v_2026_07_28`], including the modern extensions' wire shapes).
+//!   of a backend catalog.
+//! - [`v_2026_07_28`] — the revision's wire module, including the
+//!   extensions' wire shapes. Its `SUPPORTED_PROTOCOL_VERSION` is the
+//!   one version this crate speaks.
 //!
-//! Server-side dispatch (the `ProtocolHandler` trait, the registry and
-//! the per-revision handlers) stays in the gateway: this crate is
-//! frames only. The flat re-exports below preserve the historical
-//! `protocol::{Type, ...}` surface that gateway code imports through
-//! its own re-export shim.
+//! Server-side dispatch stays in the gateway: this crate is frames
+//! only. The flat re-exports below give the commonly used types a
+//! short `mcpg_mcp_wire::Type` path.
 
 // Mirrors `[lints.clippy]` in Cargo.toml. Cargo reads the manifest table and
 // other build systems do not, and a command-line `-D warnings` outranks a
@@ -31,10 +30,17 @@
 
 pub mod descriptors;
 pub mod shared;
-pub mod v_2025_11_25;
 pub mod v_2026_07_28;
-pub mod version;
 
+pub use shared::PROTOCOL_VERSION_HEADER;
+pub use shared::client_capabilities::{
+    CapabilityFlag, ClientCapabilities, ClientElicitationCapability, ClientRootsCapability,
+    ClientSamplingCapability,
+};
+pub use shared::completion::{
+    CompletionArgument, CompletionCompleteParams, CompletionContext, CompletionReference,
+    CompletionResult, CompletionValues,
+};
 pub use shared::content::{ContentAnnotations, EmbeddedResource, Icon, ToolContent};
 pub use shared::error::{
     HEADER_MISMATCH_CODE, INTERNAL_ERROR_CODE, INVALID_PARAMS_CODE, INVALID_REQUEST_CODE,
@@ -47,52 +53,19 @@ pub use shared::jsonrpc::{
     JsonRpcRequest, JsonRpcResponse, JsonRpcSuccess, ProtocolHttpResponse, ProtocolResponse,
     parse_client_message,
 };
-pub use v_2025_11_25::wire::common::{
-    CONTENT_TOO_LARGE_CODE, CancelledNotificationParams, EmptyResult, GUARDRAIL_DENIED_CODE,
-    GUARDRAIL_SERVICE_ERROR_CODE, ListChangedNotification, ListParams, ProgressNotification,
-    ProgressParams, ServerJsonRpcRequest,
+pub use shared::notifications::{
+    CancelledNotificationParams, ListChangedNotification, ProgressNotification, ProgressParams,
+    ResourceUpdatedNotification, ResourceUpdatedParams,
 };
-pub use v_2025_11_25::wire::completion::{
-    CompletionArgument, CompletionCompleteParams, CompletionContext, CompletionReference,
-    CompletionResult, CompletionValues,
-};
-pub use v_2025_11_25::wire::elicitation::{
-    ELICITATION_NOT_SUPPORTED_CODE, ElicitationAction, ElicitationCompleteNotification,
-    ElicitationCompleteParams, ElicitationCreateParams, URL_ELICITATION_REQUIRED_CODE,
-};
-pub use v_2025_11_25::wire::lifecycle::{
-    CapabilityFlag, ClientCapabilities, ClientElicitationCapability, ClientRootsCapability,
-    ClientSamplingCapability, ClientTaskElicitationCapability, ClientTaskRequestsCapability,
-    ClientTaskRootsCapability, ClientTaskSamplingCapability, ClientTasksCapability,
-    ImplementationInfo, InitializeParams, InitializeResult, ListCapability, ResourceCapability,
-    ServerCapabilities, ServerTaskRequestsCapability, ServerTaskToolsCapability, TasksCapability,
-};
-pub use v_2025_11_25::wire::logging::{
-    LoggingLevel, LoggingMessageNotification, LoggingMessageParams, LoggingSetLevelParams,
-};
-pub use v_2025_11_25::wire::operations::{
-    CapabilityOperation, LifecycleOperation, LoggingOperation, ProtocolOperation, TaskOperation,
-};
-pub use v_2025_11_25::wire::prompts::{
-    PromptGetParams, PromptGetResult, PromptMessage, PromptMessageContent, PromptsListResult,
-};
-pub use v_2025_11_25::wire::resources::{
+pub use shared::prompts::{PromptGetParams, PromptGetResult, PromptMessage, PromptMessageContent};
+pub use shared::resources::{
     BlobResourceContents, ResourceContents, ResourceReadParams, ResourceReadResult,
-    ResourceSubscribeParams, ResourceTemplate, ResourceTemplatesListResult, ResourceTextContents,
-    ResourceUpdatedNotification, ResourceUpdatedParams, ResourcesListResult,
+    ResourceTemplate, ResourceTextContents,
 };
-pub use v_2025_11_25::wire::routing::map_client_message_to_operation;
-pub use v_2025_11_25::wire::sampling::{
-    SamplingCreateMessageParams, SamplingIncludeContext, SamplingMessage, SamplingMessageContent,
+pub use shared::server_requests::{
+    DEFAULT_SAMPLING_MAX_TOKENS, ElicitationCreateParams, SamplingCreateMessageParams,
+    SamplingIncludeContext, SamplingMessage, SamplingMessageContent, ServerJsonRpcRequest,
 };
-pub use v_2025_11_25::wire::tasks::{
-    CreateTaskResult, MODEL_IMMEDIATE_RESPONSE_META_KEY, RELATED_TASK_META_KEY, Task,
-    TaskAugmentParams, TaskCancelParams, TaskGetParams, TaskResultParams, TaskStatus,
-    TaskStatusNotification, TaskStatusNotificationParams, TasksListParams, TasksListResult,
-    related_task_meta,
-};
-pub use v_2025_11_25::wire::tools::{ToolCallParams, ToolCallResult, ToolsListResult};
-pub use v_2025_11_25::wire::{
-    DEFAULT_SAMPLING_MAX_TOKENS, LEGACY_DEFAULT_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSIONS,
-    PROTOCOL_VERSION_HEADER, SESSION_ID_HEADER, SUPPORTED_PROTOCOL_VERSION,
-};
+pub use shared::tasks::{Task, TaskStatus};
+pub use shared::tools::{ToolCallParams, ToolCallResult};
+pub use v_2026_07_28::wire::SUPPORTED_PROTOCOL_VERSION;

@@ -1,38 +1,22 @@
-//! Modern lifecycle wire types — `server/discover`.
+//! Lifecycle wire types — `server/discover`.
 //!
-//! In 2026-07-28 the legacy three-step handshake
-//! (`initialize` request → `InitializeResult` response →
-//! `notifications/initialized` notification → session usable) is
-//! replaced by a single stateless request: `server/discover`.
-//!
-//! Properties:
-//!
-//! - **Single round-trip.** The client posts `server/discover`,
-//!   the server returns capabilities, and the conversation
-//!   continues without a follow-up notification. SEP-2575 +
-//!   SEP-2567.
-//! - **No session.** Modern requests are stateless; the response
-//!   does not mint an `Mcp-Session-Id`. Subsequent calls do not
-//!   carry one.
+//! - **Single stateless round-trip.** The client posts
+//!   `server/discover` and the server returns its identity, supported
+//!   versions and capabilities (SEP-2575 + SEP-2567). Nothing follows
+//!   it and nothing is negotiated: every later request carries its own
+//!   identity in `_meta`.
 //! - **Capability-only.** Server response shape carries
 //!   `serverInfo`, `supportedVersions`, capabilities, and an
 //!   optional `instructions` string. It is a `CacheableResult`
 //!   (SEP-2549/2322): required `resultType` + `ttlMs` +
-//!   `cacheScope`. The modern
-//!   `ServerCapabilities` is a slimmer surface than 2025-11-25:
-//!   `subscribe` is no longer a `resources` sub-flag (it moves to
-//!   `subscriptions/listen` per SEP-2575); `roots`, `sampling`,
-//!   and `logging` are deprecated per SEP-2577 (12-month grace
-//!   runway) and intentionally absent from this file.
-//! - **Extensions.** SEP-2133 lands as the typed `extensions`
+//!   `cacheScope`. Resource subscriptions are established over
+//!   `subscriptions/listen` (SEP-2575); `roots`, `sampling`, and
+//!   `logging` are deprecated per SEP-2577 (12-month grace runway)
+//!   and absent from this file.
+//! - **Extensions.** SEP-2133 extensions are the typed `extensions`
 //!   maps on both `ClientCapabilities` and `ServerCapabilities`;
 //!   keys are reverse-DNS strings (`io.modelcontextprotocol/...`
 //!   or vendor-prefixed).
-//!
-//! The `inputs`, `subscriptions`, and `tasks` capabilities the
-//! modern revision adds for MRTR / `subscriptions/listen` / the
-//! tasks extension are introduced in Phases 4 and 5; this file
-//! ships the discovery surface that's reachable today.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,7 +25,7 @@ use crate::shared::caching::{CacheScope, default_result_type_complete};
 use crate::shared::content::Icon;
 pub use crate::v_2026_07_28::extensions::events::wire::EventsCapability;
 
-/// JSON-RPC method name for the modern discovery request.
+/// JSON-RPC method name for the discovery request.
 pub const METHOD_SERVER_DISCOVER: &str = "server/discover";
 
 // ---------------------------------------------------------------------------
@@ -78,10 +62,9 @@ pub struct DiscoverParams {
 
 /// Result body for `server/discover`. A `CacheableResult`
 /// (SEP-2549/2322): `resultType` + `ttlMs` + `cacheScope` are
-/// required on the modern wire. The final schema dropped the
-/// singular `protocolVersion` field — discovery advertises the
-/// `supportedVersions` set instead, and the negotiated revision
-/// rides on the `MCP-Protocol-Version` response header.
+/// required. Discovery advertises the `supportedVersions` set; the
+/// revision of the exchange rides on the `MCP-Protocol-Version`
+/// response header.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoverResult {
@@ -131,8 +114,7 @@ pub struct ImplementationInfo {
     /// One-paragraph self-description shown next to `title`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Branding icons (same shape as 2025-11-25: `src` + `mimeType`
-    /// + `sizes` + `theme`).
+    /// Branding icons (`src` + `mimeType` + `sizes` + `theme`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icons: Option<Vec<Icon>>,
     /// Canonical project / vendor URL.
@@ -144,7 +126,7 @@ pub struct ImplementationInfo {
 // Server capability advertisement.
 // ---------------------------------------------------------------------------
 
-/// Modern server-side capabilities.
+/// Server-side capabilities.
 ///
 /// Each `Option<...>` field is `None` when the server does not
 /// advertise that capability. Capabilities the server *does*
@@ -162,9 +144,8 @@ pub struct ServerCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompts: Option<PromptsCapability>,
     /// Resource read / template surface. The `subscribe` sub-flag
-    /// here advertises per-resource update delivery; unlike
-    /// 2025-11-25, the subscribe/unsubscribe *methods* are removed and
-    /// subscriptions are established over `subscriptions/listen`.
+    /// here advertises per-resource update delivery over
+    /// `subscriptions/listen`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<ResourcesCapability>,
     /// `completion/complete` argument-completion surface. The wire key
@@ -223,10 +204,9 @@ pub struct ResourcesCapability {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_changed: Option<bool>,
     /// Server honors per-resource `resources/updated` subscriptions
-    /// established over `subscriptions/listen`. Distinct from the
-    /// 2025-11-25 `resources/subscribe` method (removed on this wire);
-    /// the flag advertises that the long-lived listen stream will
-    /// deliver `notifications/resources/updated` for subscribed URIs.
+    /// established over `subscriptions/listen`: the long-lived listen
+    /// stream delivers `notifications/resources/updated` for
+    /// subscribed URIs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscribe: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -251,14 +231,11 @@ pub struct CacheCapability {}
 // Client capability advertisement.
 // ---------------------------------------------------------------------------
 
-/// Modern client-side capabilities.
+/// Client-side capabilities as `server/discover` params carry them.
 ///
-/// The `inputs` (MRTR — SEP-2322) and `subscriptions`
-/// (`subscriptions/listen` — SEP-2575) flags are advertised
-/// alongside the corresponding server-side dispatch. The
-/// `roots`, `sampling`, and `logging` sub-flags on the legacy
-/// `ClientCapabilities` are intentionally absent here per
-/// SEP-2577.
+/// Only the SEP-2133 `extensions` map is typed here; the gateway reads
+/// the `roots` / `sampling` / `elicitation` declarations of a request
+/// through [`crate::shared::client_capabilities::ClientCapabilities`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientCapabilities {
@@ -374,8 +351,8 @@ mod tests {
         assert_eq!(v["resultType"], "complete");
         assert_eq!(v["ttlMs"], 60_000);
         assert_eq!(v["cacheScope"], "public");
-        // The singular `protocolVersion` field is gone (VN-5);
-        // discovery advertises `supportedVersions` instead.
+        // Discovery advertises `supportedVersions`, never a singular
+        // `protocolVersion`.
         assert!(v.get("protocolVersion").is_none());
         assert_eq!(v["supportedVersions"][0], "2026-07-28");
         // Top-level camelCase rename.
@@ -387,7 +364,7 @@ mod tests {
         assert_eq!(v["capabilities"]["prompts"]["listChanged"], false);
         assert!(v["capabilities"]["prompts"].get("cache").is_none());
         // Completion advertises presence with an empty object under
-        // the plural `completions` key (PR-02).
+        // the plural `completions` key.
         assert!(v["capabilities"]["completions"].is_object());
         assert!(v["capabilities"].get("completion").is_none());
         assert!(v["capabilities"].get("events").is_none());

@@ -1,26 +1,15 @@
-//! Operation discriminants — the modern (`2026-07-28`) typed enum
-//! the dispatcher matches on after parsing a `ClientMessage`.
+//! Operation discriminants — the typed enum the dispatcher matches on
+//! after parsing a `ClientMessage`.
 //!
-//! Mirrors `protocol::v_2025_11_25::wire::operations::ProtocolOperation`
-//! in shape but with a different variant set:
+//! - [`LifecycleOperation`] — `server/discover` and the client
+//!   notifications.
+//! - [`CapabilityOperation`] — the tools / prompts / resources /
+//!   completion methods and `subscriptions/listen`.
+//! - [`TasksExtensionOperation`], [`EventsExtensionOperation`] and the
+//!   Skills operations — one arm per extension.
 //!
-//! - **No `Initialize` / `Initialized` / `Ping`** — replaced by a
-//!   single `Discover`. Stateless model has no handshake follow-up.
-//! - **No `Logging::SetLevel`** — per-request `_meta.logLevel`
-//!   replaces session-scoped log-level subscription.
-//! - **No `Tasks::*` arm** — tasks become an extension; routing
-//!   for `io.modelcontextprotocol/tasks/*` lives in
-//!   `v_2026_07_28/extensions/tasks/wire.rs`.
-//! - **No `ResourcesSubscribe` / `ResourcesUnsubscribe`** —
-//!   subscriptions move to `subscriptions/listen`.
-//! - **No `Capabilities::Complete`** — `completion/complete` is
-//!   handled through its own wire types and pipeline arm.
-//! - **No `ServerRequestResponse`** — MRTR resumption flows
-//!   through the modern transport's body-`_meta.inputResponses`
-//!   path, not as a synthetic operation variant.
-//!
-//! The result is a smaller, flatter enum that's closer to the
-//! actual method surface a modern client sees today.
+//! MRTR resumption is not an operation of its own: the answers ride on
+//! the retried request's `requestState` and `inputResponses` params.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -127,8 +116,8 @@ impl EventsExtensionOperation {
     }
 }
 
-/// SEP-2663 tasks-extension operations. Routed by the modern
-/// router when the inbound method matches one of the bare
+/// SEP-2663 tasks-extension operations. Routed when the inbound
+/// method matches one of the bare
 /// `tasks/{get,update,cancel}` strings. There is no client
 /// `createTask` — a task is materialized server-side during
 /// `tools/call` (see the `resultType: "task"` seam).
@@ -162,15 +151,15 @@ impl TasksExtensionOperation {
 
 #[derive(Debug, Clone, Serialize)]
 pub enum LifecycleOperation {
-    /// `server/discover` — replaces the legacy `initialize` +
-    /// `InitializeResult` + `notifications/initialized` chain with a
-    /// single stateless request (SEP-2575 + SEP-2567).
+    /// `server/discover` — a single stateless request that returns the
+    /// server's identity, supported versions and capabilities
+    /// (SEP-2575 + SEP-2567).
     Discover {
         request_id: Value,
         params: DiscoverParams,
     },
     /// `notifications/cancelled` — client signals it has aborted a
-    /// pending request. Kept across versions; same shape.
+    /// pending request.
     NotificationCancelled {
         request_id: Value,
         reason: Option<String>,
@@ -212,19 +201,17 @@ pub enum CapabilityOperation {
         params: ResourceTemplatesListParams,
     },
     /// `completion/complete` — autocomplete for prompt arguments
-    /// and resource-template variables. Wire shape is unchanged
-    /// from 2025-11-25.
+    /// and resource-template variables.
     Complete {
         request_id: Value,
         params: CompletionCompleteParams,
     },
-    /// `subscriptions/listen` (SEP-2575) — long-lived POST-SSE
-    /// stream that replaces the legacy GET-/mcp delivery channel
-    /// and `resources/{subscribe,unsubscribe}` methods. The
-    /// transport detects this variant and switches into SSE
-    /// streaming mode; `Handler::dispatch` is NOT called for
-    /// this operation (the response is a stream, not a finite
-    /// envelope).
+    /// `subscriptions/listen` (SEP-2575) — the long-lived POST-SSE
+    /// stream that carries list-changed, resource-updated and task
+    /// notifications. The transport detects this variant and
+    /// switches into SSE streaming mode; the handler's finite
+    /// dispatch is NOT called for this operation (the response is a
+    /// stream, not a finite envelope).
     SubscriptionsListen {
         request_id: Value,
         params: SubscriptionsListenParams,
@@ -233,8 +220,7 @@ pub enum CapabilityOperation {
 
 impl ProtocolOperation {
     /// Short stable label for metrics / log spans / `ProtocolMessage`
-    /// identification. Mirrors the legacy enum's `label()` strings
-    /// (`"lifecycle.<arm>"` / `"capabilities.<arm>"`).
+    /// identification (`"lifecycle.<arm>"` / `"capabilities.<arm>"`).
     pub fn label(&self) -> &'static str {
         match self {
             Self::Lifecycle(LifecycleOperation::Discover { .. }) => "lifecycle.discover",
@@ -287,12 +273,8 @@ impl ProtocolOperation {
                 LifecycleOperation::Discover { request_id, .. } => Some(request_id.clone()),
                 // `notifications/cancelled` carries the id of the request it
                 // TARGETS, which is not an id of its own — a notification has
-                // none. Returning it here would enter the target's id into the
-                // per-session duplicate-id tracker (a second time, since the
-                // targeted request already recorded it) and reject the
-                // cancellation as a duplicate, which is to say: make every
-                // cancellation of a request you actually issued impossible.
-                // The dispatch arm reads the targeted id off the operation.
+                // none. The dispatch arm reads the targeted id off the
+                // operation.
                 LifecycleOperation::NotificationCancelled { .. }
                 | LifecycleOperation::NotificationAccepted => None,
             },
@@ -417,10 +399,7 @@ mod tests {
     }
 
     /// A notification has no request id of its own. The id on
-    /// `notifications/cancelled` belongs to the request being cancelled and is
-    /// already in the per-session duplicate tracker; surfacing it here re-enters
-    /// it and rejects the cancellation with `-32600`, making cancellation of any
-    /// request the client actually issued impossible.
+    /// `notifications/cancelled` belongs to the request being cancelled.
     #[test]
     fn client_request_id_none_for_notification_cancelled() {
         let op = ProtocolOperation::Lifecycle(LifecycleOperation::NotificationCancelled {

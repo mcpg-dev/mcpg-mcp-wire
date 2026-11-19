@@ -269,14 +269,12 @@ impl<'de> Deserialize<'de> for SubscriptionsListenParams {
 }
 
 /// One subscription target. Tagged-union on `type`; covers every
-/// notification kind the modern wire emits today.
+/// notification kind a listen stream carries.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum SubscriptionTarget {
     /// Per-resource update events
-    /// (`notifications/resources/updated`). The legacy spec used
-    /// `resources/subscribe` + `resources/unsubscribe`; modern
-    /// subscribes via this `subscriptions/listen` entry instead.
+    /// (`notifications/resources/updated`) for one URI.
     #[serde(rename = "resources/updated")]
     ResourcesUpdated {
         /// Resource URI being watched.
@@ -295,8 +293,7 @@ pub enum SubscriptionTarget {
     /// changes.
     #[serde(rename = "resources/listChanged")]
     ResourcesListChanged,
-    /// SEP-2663 tasks-extension status events
-    /// (`notifications/io.modelcontextprotocol/tasks/status`).
+    /// SEP-2663 tasks-extension status events (`notifications/tasks`).
     /// Optionally scoped to a specific `taskId`; absent means the
     /// client wants every task-status event in its session.
     #[serde(rename = "io.modelcontextprotocol/tasks/status")]
@@ -390,14 +387,11 @@ pub fn subscription_matches(targets: &[SubscriptionTarget], method: &str, payloa
                 }
             }
             SubscriptionTarget::TasksStatus { task_id } => {
-                // The modern (`2026-07-28`) wire emits the bare SEP-2663
-                // `notifications/tasks`; the namespaced + legacy-spelled
-                // `notifications/tasks/status` forms are accepted so a
-                // subscriber sees task events from either era during the
-                // migration window.
-                if method == "notifications/tasks"
+                // SEP-2663 names the notification `notifications/tasks`;
+                // the extension-namespaced spelling matches too.
+                if method
+                    == crate::v_2026_07_28::extensions::tasks::wire::METHOD_NOTIFICATIONS_TASKS
                     || method == "notifications/io.modelcontextprotocol/tasks/status"
-                    || method == "notifications/tasks/status"
                 {
                     // Filter by taskId when the client scoped the
                     // subscription. Absent → match every task.

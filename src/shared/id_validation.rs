@@ -1,9 +1,8 @@
 //! JSON-RPC `id` field validation rules (string | non-empty number,
 //! never null / boolean / object / array / empty string).
 //!
-//! Same in every MCP revision — JSON-RPC 2.0 itself defines the
-//! allowed shapes and MCP adds the "non-empty string" tightening so
-//! ids can be reliably correlated for task replay.
+//! JSON-RPC 2.0 itself defines the allowed shapes and MCP adds the
+//! "non-empty string" tightening so ids can be reliably correlated.
 
 use serde_json::Value;
 
@@ -12,11 +11,11 @@ use crate::shared::error::ProtocolError;
 /// Upper bound on a string `id`, in bytes.
 ///
 /// An id is a correlation token, so a couple of hundred bytes is already
-/// generous — but the gateway remembers ids in a per-session replay window,
-/// which turns an unbounded id into caller-controlled server memory. The
-/// bound is enforced here so it applies once for every wire version, and
-/// mirrors the `MAX_KEY_LEN` the idempotency key on the same request path
-/// has always had.
+/// generous — but the gateway keys stored state by it (cancellation
+/// registrations, suspended pipelines), which turns an unbounded id into
+/// caller-controlled server memory. The bound is enforced here, once for
+/// every request path, and mirrors the `MAX_KEY_LEN` of the idempotency
+/// key on the same request.
 pub const MAX_JSONRPC_ID_LEN: usize = 256;
 
 /// Validate that a JSON-RPC `id` is one of the allowed shapes:
@@ -57,8 +56,8 @@ mod tests {
         assert!(validate_jsonrpc_id(&json!(-1)).is_ok());
     }
 
-    /// The gateway remembers ids in a per-session replay window, so an
-    /// unbounded id is caller-controlled server memory.
+    /// The gateway keys stored state by the id, so an unbounded id is
+    /// caller-controlled server memory.
     #[test]
     fn rejects_over_long_string_id() {
         let ok = "a".repeat(MAX_JSONRPC_ID_LEN);

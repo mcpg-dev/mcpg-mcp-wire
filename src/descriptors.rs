@@ -1,3 +1,6 @@
+//! Tool / prompt / resource descriptors of a backend catalog, as the
+//! gateway holds them before projecting each list result.
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -21,7 +24,7 @@ pub struct ToolDescriptor {
     pub meta: Option<Value>,
 }
 
-/// Hints about a tool's behavior per MCP 2025-11-25 spec.
+/// Hints about a tool's behavior.
 /// All fields are optional hints — clients SHOULD NOT make tool use decisions
 /// based solely on annotations from untrusted servers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,7 +42,7 @@ pub struct ToolAnnotations {
     pub open_world_hint: Option<bool>,
 }
 
-/// Execution-related properties for a tool per MCP 2025-11-25 spec.
+/// Execution-related properties of a tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolExecution {
@@ -47,7 +50,7 @@ pub struct ToolExecution {
     pub task_support: Option<TaskSupport>,
 }
 
-/// Whether a tool supports task-augmented execution.
+/// Whether a tool may run as a task (SEP-2663).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskSupport {

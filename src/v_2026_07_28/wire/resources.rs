@@ -1,35 +1,25 @@
-//! Modern `resources/*` wire types for MCP revision `2026-07-28`.
+//! `resources/*` wire types for MCP revision `2026-07-28`.
 //!
-//! Surface today:
 //! - `resources/list` request + result (with SEP-2549 cache triple).
 //! - `resources/templates/list` request + result (with SEP-2549
 //!   cache triple).
 //! - `resources/read` request + result.
 //!
-//! ## Differences from 2025-11-25
+//! Resource updates are not a method of this surface: a client
+//! subscribes over `subscriptions/listen`, one long-lived POST-SSE
+//! response that multiplexes every update type, including
+//! `notifications/resources/updated`.
 //!
-//! - **No subscribe / unsubscribe.** The legacy
-//!   `resources/subscribe` + `resources/unsubscribe` methods and
-//!   the matching `subscribe` sub-flag on `ResourcesCapability` are
-//!   removed. The modern revision routes live update streams
-//!   through `subscriptions/listen` — a single long-lived
-//!   POST-SSE response per session that multiplexes every update
-//!   type instead of one server-initiated request per resource.
-//! - **No `notifications/resources/updated`.** Same reason —
-//!   updates ride on the `subscriptions/listen` stream.
-//! - **Cache fields on the list + read endpoints.** Required
-//!   result-level `result_type` + `ttl_ms` + `cache_scope`
-//!   (`CacheableResult`, SEP-2549/2322); per-entry `cache_scope`
-//!   override on `ResourceDescriptor` for catalogs that mix
-//!   per-tenant and global resources.
+//! The list and read results are `CacheableResult`s (SEP-2549/2322):
+//! required result-level `result_type` + `ttl_ms` + `cache_scope`,
+//! plus a per-entry `cache_scope` override on `ResourceDescriptor` for
+//! catalogs that mix per-tenant and global resources.
 //!
-//! ## Content shape reuse
-//!
-//! `ResourceContents` (text / blob variants) is duplicated from
-//! the legacy module for per-version isolation, but the bytes are
-//! identical today — `EmbeddedResource` and friends in
-//! [`protocol::shared::content`](crate::shared::content)
-//! continue to be the cross-version primitives.
+//! `ResourceContents` here is the typed `resources/read` result entry
+//! of this revision; the gateway runtime builds
+//! [`crate::shared::resources::ResourceContents`], whose bytes are the
+//! same. Content blocks (`EmbeddedResource` and friends) live in
+//! [`crate::shared::content`].
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -60,8 +50,7 @@ pub struct ResourcesListParams {
 }
 
 /// Result of `resources/list`. A `CacheableResult` (SEP-2549):
-/// `resultType` + `ttlMs` + `cacheScope` are required on the modern
-/// wire.
+/// `resultType` + `ttlMs` + `cacheScope` are required.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourcesListResult {

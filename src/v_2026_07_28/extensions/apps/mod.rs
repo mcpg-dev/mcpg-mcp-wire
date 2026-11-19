@@ -1,4 +1,4 @@
-//! SEP-1865 **MCP Apps** extension — modern-wire typed surface.
+//! SEP-1865 **MCP Apps** extension — typed surface.
 //!
 //! MCP Apps (`io.modelcontextprotocol/ui`) lets a server attach an
 //! interactive HTML UI to a tool. Unlike the [`tasks`] extension, Apps
@@ -8,7 +8,7 @@
 //! ordinary `tools/call` arm. So there is no dispatch arm here — only
 //! wire types.
 //!
-//! The version-agnostic machinery — constants, the `ui://`
+//! The shared machinery — constants, the `ui://`
 //! resourceUri rewrite used by federation, and the CSP/permission
 //! policy engine — lives in [`crate::shared::apps`] and is
 //! re-exported here for convenience.

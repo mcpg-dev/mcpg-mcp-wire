@@ -1,10 +1,9 @@
-//! JSON-RPC 2.0 envelope types shared across MCP protocol revisions.
+//! JSON-RPC 2.0 envelope types.
 //!
-//! The JSON-RPC layer is the same in every MCP version: requests carry
-//! `id` + `method` + `params`; notifications drop the `id`; responses
-//! drop the `method`. This module owns the envelope types plus the
-//! single entry point that turns a raw JSON body into a typed
-//! [`ClientMessage`].
+//! Requests carry `id` + `method` + `params`; notifications drop the
+//! `id`; responses drop the `method`. This module owns the envelope
+//! types plus the single entry point that turns a raw JSON body into a
+//! typed [`ClientMessage`].
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -49,9 +48,10 @@ pub struct JsonRpcNotification {
     pub params: Option<Value>,
 }
 
-/// A JSON-RPC response from the client to a server-initiated request
-/// (legacy versions only). Has `id` and either `result` or `error`,
-/// but no `method` field.
+/// A JSON-RPC response sent by the client. Has `id` and either
+/// `result` or `error`, but no `method` field. The router classifies it
+/// so it can refuse it: input reaches the server as `inputResponses`
+/// on a retried request, never as a response message.
 #[derive(Debug, Clone, Deserialize)]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
@@ -71,14 +71,10 @@ pub enum ProtocolResponse {
     NotificationAccepted,
 }
 
-/// Protocol response enriched with HTTP-level metadata (status code,
-/// session header). The `session_id_header` field is populated only
-/// by legacy versions (modern stateless versions leave it `None`).
+/// Protocol response enriched with its HTTP status code.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProtocolHttpResponse {
     pub http_status: u16,
-    #[serde(skip_serializing)]
-    pub session_id_header: Option<String>,
     pub response: ProtocolResponse,
 }
 
@@ -106,10 +102,9 @@ pub struct JsonRpcErrorBody {
 
 /// Parse a single JSON-RPC message body.
 ///
-/// MCP 2025-11-25 requires each POST body to contain exactly one
-/// JSON-RPC request, notification, or response. Batch arrays were
-/// removed from the spec in 2025-06-18 and are not accepted by MCPG;
-/// the transport layer rejects them before this call.
+/// Each body carries exactly one JSON-RPC request, notification, or
+/// response. MCP defines no batch arrays; the transport layer rejects
+/// them before this call.
 ///
 /// Validates `_meta` keys per MCP reserved-prefix rules (`mcp.` /
 /// `modelcontextprotocol.` namespaces fail closed), then checks the
@@ -129,9 +124,7 @@ pub fn parse_client_message(body: Value) -> Result<ClientMessage, ProtocolError>
     let has_error = obj.contains_key("error");
 
     // Classify STRICTLY before the untagged deserialize, so a malformed
-    // request can't fall through to the Response variant and be mistaken
-    // for a client answer to a server-initiated request (which would
-    // inject a bogus step result into a suspended pipeline). A message
+    // request can't fall through to the Response variant. A message
     // carrying `method` is a Request/Notification; one without is a
     // Response and must satisfy JSON-RPC 2.0's exactly-one(result|error).
     if has_method {
@@ -164,8 +157,8 @@ pub fn parse_client_message(body: Value) -> Result<ClientMessage, ProtocolError>
             });
     }
 
-    // No `method` → it must be a Response to a server-initiated request:
-    // a validated non-null `id` plus EXACTLY ONE of `result`/`error`.
+    // No `method` → it must be a Response: a validated non-null `id`
+    // plus EXACTLY ONE of `result`/`error`.
     if !has_id {
         return Err(ProtocolError::invalid_request(
             "JSON-RPC message must carry a `method` (request/notification) or an `id` (response)",
@@ -186,14 +179,13 @@ pub fn parse_client_message(body: Value) -> Result<ClientMessage, ProtocolError>
 
 /// A `-32603` internal error as an HTTP 500 protocol response.
 ///
-/// The shape both wires answer with when the gateway itself failed rather than
-/// the request — a dropped runtime handle, a serialization that cannot fail but
-/// did. Kept beside [`ProtocolHttpResponse`] so the two wires cannot drift on
-/// the status/code pairing.
+/// The answer when the gateway itself failed rather than the request — a
+/// dropped runtime handle, a serialization that cannot fail but did. Kept
+/// beside [`ProtocolHttpResponse`] so every caller pairs the status and the
+/// code the same way.
 pub fn handler_internal_error(jsonrpc_id: Option<Value>, message: &str) -> ProtocolHttpResponse {
     ProtocolHttpResponse {
         http_status: 500,
-        session_id_header: None,
         response: ProtocolResponse::JsonRpcError(JsonRpcError {
             jsonrpc: JSONRPC_VERSION,
             id: jsonrpc_id,
@@ -220,10 +212,9 @@ mod tests {
 
     #[test]
     fn rejects_array_body() {
-        // MCP 2025-11-25 forbids batch arrays. The transport rejects
-        // arrays before calling parse_client_message; this confirms the
-        // parser itself will not silently coerce an array into a
-        // single message.
+        // The transport rejects batch arrays before calling
+        // parse_client_message; the parser itself must not coerce an
+        // array into a single message either.
         let body = json!([{ "jsonrpc": "2.0", "id": 1, "method": "ping" }]);
         assert!(parse_client_message(body).is_err());
     }
@@ -264,7 +255,7 @@ mod tests {
     #[test]
     fn rejects_non_string_method() {
         // `{"id":5,"method":123}` must not fall through to a Response with
-        // a null result (which would advance a suspended pipeline).
+        // a null result.
         let err =
             parse_client_message(json!({ "jsonrpc": "2.0", "id": 5, "method": 123 })).unwrap_err();
         assert!(

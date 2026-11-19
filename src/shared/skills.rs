@@ -1,4 +1,4 @@
-//! Version-agnostic wire of the **Skills extension** (SEP-2640,
+//! Wire of the **Skills extension** (SEP-2640,
 //! `io.modelcontextprotocol/skills`).
 //!
 //! A skill is a directory of files with a `SKILL.md` at its root, served
@@ -11,17 +11,17 @@
 //! - `resources/directory/read` — the direct children of a directory
 //!   resource, offered when the server declares `directoryRead: true`.
 //!
-//! Both wire revisions route the same three methods to
-//! [`SkillsOperation`]; whether a gateway serves them is the dispatcher's
-//! decision, so params that do not parse become
-//! [`SkillsOperation::InvalidParams`] rather than a routing error.
+//! The router sends the three methods to [`SkillsOperation`]; whether a
+//! gateway serves them is the dispatcher's decision, so params that do
+//! not parse become [`SkillsOperation::InvalidParams`] rather than a
+//! routing error.
 
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use crate::descriptors::ResourceDescriptor;
+use crate::shared::caching::CacheScope;
 use crate::shared::error::ProtocolError;
-use crate::shared::jsonrpc::JsonRpcRequest;
 use crate::shared::routing as shared_routing;
 
 /// The extension's identifier in `capabilities.extensions`.
@@ -125,28 +125,24 @@ pub struct SkillEntry {
     pub resources: SkillResources,
 }
 
-/// `skills/list` result. The modern wire fills `result_type` and the
-/// SEP-2549 caching fields; the legacy wire leaves them out.
+/// `skills/list` result: a `CacheableResult` carrying the SEP-2322
+/// `resultType` and the SEP-2549 caching fields.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ListSkillsResult {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_type: Option<String>,
+    pub result_type: String,
     pub skills: Vec<SkillEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ttl_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_scope: Option<String>,
+    pub ttl_ms: u64,
+    pub cache_scope: CacheScope,
 }
 
 /// `skills/get` result.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GetSkillResult {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_type: Option<String>,
+    pub result_type: String,
     pub skill: SkillEntry,
 }
 
@@ -154,8 +150,7 @@ pub struct GetSkillResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadDirectoryResult {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_type: Option<String>,
+    pub result_type: String,
     pub resources: Vec<ResourceDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
@@ -226,33 +221,40 @@ pub fn is_skills_method(method: &str) -> bool {
     )
 }
 
-/// Route a request whose method [`is_skills_method`].
-pub fn route_request(request: &JsonRpcRequest) -> SkillsOperation {
-    let request_id = request.id.clone();
-    let invalid = |method: &'static str, error: ProtocolError| SkillsOperation::InvalidParams {
-        request_id: request.id.clone(),
-        method,
-        message: error.message().to_owned(),
+/// Route request `request_id` of `method`, a method [`is_skills_method`],
+/// with its `params`.
+pub fn route_request(request_id: Value, method: &str, params: Option<Value>) -> SkillsOperation {
+    let invalid = |request_id: Value, method: &'static str, error: ProtocolError| {
+        SkillsOperation::InvalidParams {
+            request_id,
+            method,
+            message: error.message().to_owned(),
+        }
     };
-    match request.method.as_str() {
-        METHOD_LIST_SKILLS => {
-            match shared_routing::optional_params::<ListSkillsParams>(request, METHOD_LIST_SKILLS) {
-                Ok(params) => SkillsOperation::List { request_id, params },
-                Err(error) => invalid(METHOD_LIST_SKILLS, error),
-            }
-        }
-        METHOD_GET_SKILL => {
-            match shared_routing::required_params::<GetSkillParams>(request, METHOD_GET_SKILL) {
-                Ok(params) => SkillsOperation::Get { request_id, params },
-                Err(error) => invalid(METHOD_GET_SKILL, error),
-            }
-        }
+    match method {
+        METHOD_LIST_SKILLS => match shared_routing::optional_params::<ListSkillsParams>(
+            params,
+            &request_id,
+            METHOD_LIST_SKILLS,
+        ) {
+            Ok(params) => SkillsOperation::List { request_id, params },
+            Err(error) => invalid(request_id, METHOD_LIST_SKILLS, error),
+        },
+        METHOD_GET_SKILL => match shared_routing::required_params::<GetSkillParams>(
+            params,
+            &request_id,
+            METHOD_GET_SKILL,
+        ) {
+            Ok(params) => SkillsOperation::Get { request_id, params },
+            Err(error) => invalid(request_id, METHOD_GET_SKILL, error),
+        },
         _ => match shared_routing::required_params::<ReadDirectoryParams>(
-            request,
+            params,
+            &request_id,
             METHOD_READ_DIRECTORY,
         ) {
             Ok(params) => SkillsOperation::ReadDirectory { request_id, params },
-            Err(error) => invalid(METHOD_READ_DIRECTORY, error),
+            Err(error) => invalid(request_id, METHOD_READ_DIRECTORY, error),
         },
     }
 }
@@ -286,37 +288,29 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn request(method: &str, params: Option<Value>) -> JsonRpcRequest {
-        JsonRpcRequest {
-            jsonrpc: "2.0".to_owned(),
-            id: json!(4),
-            method: method.to_owned(),
-            params,
-        }
+    fn route(method: &str, params: Option<Value>) -> SkillsOperation {
+        route_request(json!(4), method, params)
     }
 
     #[test]
     fn routes_each_method_with_its_params() {
         assert!(matches!(
-            route_request(&request(METHOD_LIST_SKILLS, None)),
+            route(METHOD_LIST_SKILLS, None),
             SkillsOperation::List { params, .. } if params.cursor.is_none()
         ));
         assert!(matches!(
-            route_request(&request(METHOD_LIST_SKILLS, Some(json!({ "cursor": "c" })))),
+            route(METHOD_LIST_SKILLS, Some(json!({ "cursor": "c" }))),
             SkillsOperation::List { params, .. } if params.cursor.as_deref() == Some("c")
         ));
         assert!(matches!(
-            route_request(&request(
-                METHOD_GET_SKILL,
-                Some(json!({ "uri": "skill://a/SKILL.md" }))
-            )),
+            route(METHOD_GET_SKILL, Some(json!({ "uri": "skill://a/SKILL.md" }))),
             SkillsOperation::Get { params, .. } if params.uri == "skill://a/SKILL.md"
         ));
         assert!(matches!(
-            route_request(&request(
+            route(
                 METHOD_READ_DIRECTORY,
                 Some(json!({ "uri": "skill://a", "cursor": "x" }))
-            )),
+            ),
             SkillsOperation::ReadDirectory { params, .. }
                 if params.uri == "skill://a" && params.cursor.as_deref() == Some("x")
         ));
@@ -324,13 +318,13 @@ mod tests {
 
     #[test]
     fn params_that_do_not_parse_become_an_operation() {
-        let op = route_request(&request(METHOD_GET_SKILL, None));
+        let op = route(METHOD_GET_SKILL, None);
         assert!(
             matches!(op, SkillsOperation::InvalidParams { method, .. } if method == METHOD_GET_SKILL)
         );
         assert_eq!(op.label(), "skills_ext.get");
         assert_eq!(op.request_id(), &json!(4));
-        let op = route_request(&request(METHOD_READ_DIRECTORY, Some(json!({ "uri": 3 }))));
+        let op = route(METHOD_READ_DIRECTORY, Some(json!({ "uri": 3 })));
         assert!(matches!(op, SkillsOperation::InvalidParams { .. }));
     }
 
@@ -349,11 +343,11 @@ mod tests {
             }]),
         };
         let listed = ListSkillsResult {
-            result_type: Some("complete".to_owned()),
+            result_type: "complete".to_owned(),
             skills: vec![entry.clone()],
             next_cursor: None,
-            ttl_ms: Some(30_000),
-            cache_scope: Some("private".to_owned()),
+            ttl_ms: 30_000,
+            cache_scope: CacheScope::Private,
         };
         assert_eq!(
             serde_json::to_value(&listed).unwrap(),
@@ -379,6 +373,31 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&dynamic).unwrap()["resources"],
             "dynamic"
+        );
+    }
+
+    #[test]
+    fn get_and_directory_results_carry_the_result_type() {
+        let got = GetSkillResult {
+            result_type: "complete".to_owned(),
+            skill: SkillEntry {
+                uri: "skill://a/SKILL.md".to_owned(),
+                frontmatter: Map::new(),
+                resources: SkillResources::Dynamic,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&got).unwrap()["resultType"],
+            "complete"
+        );
+        let listed = ReadDirectoryResult {
+            result_type: "complete".to_owned(),
+            resources: Vec::new(),
+            next_cursor: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&listed).unwrap(),
+            json!({ "resultType": "complete", "resources": [] })
         );
     }
 

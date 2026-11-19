@@ -1,13 +1,8 @@
 //! [`ProtocolError`] — the parser / dispatcher error type — plus the
-//! standard JSON-RPC 2.0 error code constants.
-//!
-//! Per-version error codes (`-32042 URL_ELICITATION_REQUIRED`,
-//! `-32100 ELICITATION_NOT_SUPPORTED`, guardrail / content-too-large
-//! codes that drift between revisions, etc.) live in the version's
-//! own wire module under `protocol/v_<date>/wire/`. This file owns
-//! only the codes that are stable across every MCP revision MCPG
-//! supports — the five JSON-RPC 2.0 baseline codes and the
-//! application-level (`-33xxx`) payment codes.
+//! error code constants: the five JSON-RPC 2.0 baseline codes, the
+//! MCP-reserved (`-32020..-32099`) codes, and the application-level
+//! (`-33xxx`) payment codes. Extension-specific codes live with their
+//! extension (e.g. the MCP Events codes).
 
 use serde_json::Value;
 
@@ -24,26 +19,23 @@ pub const INVALID_PARAMS_CODE: i32 = -32602;
 /// JSON-RPC 2.0: Internal error.
 pub const INTERNAL_ERROR_CODE: i32 = -32603;
 
-/// MCP-reserved JSON-RPC error code: the negotiated protocol version is
-/// not supported by this server. The `2026-07-28` revision moved this
-/// from the impl-defined `-32004` into the MCP-reserved band
-/// (`-32020..-32099`).
+/// MCP-reserved JSON-RPC error code: the request names no protocol
+/// version, or one this server does not serve.
 pub const UNSUPPORTED_PROTOCOL_VERSION_CODE: i32 = -32022;
 
 /// MCP-reserved JSON-RPC error code: a required client capability was
-/// not declared on a request that needs it (`2026-07-28`).
+/// not declared on a request that needs it.
 pub const MISSING_REQUIRED_CLIENT_CAPABILITY_CODE: i32 = -32021;
 
 /// MCP-reserved JSON-RPC error code: an HTTP routing header
 /// (`Mcp-Protocol-Version` cross-check, `Mcp-Method`, `Mcp-Name`)
-/// disagrees with the request body (`2026-07-28`, SEP-2243/SEP-2575).
+/// disagrees with the request body (SEP-2243/SEP-2575).
 pub const HEADER_MISMATCH_CODE: i32 = -32020;
 
 /// MPP-defined JSON-RPC error code for payment required.
 ///
-/// Application-level range (`-33xxx`) to avoid collision with MCP
-/// spec codes — see commit history for the migration off `-32042`,
-/// which the spec reserved for URL-mode elicitation.
+/// Application-level range (`-33xxx`), so it never collides with an
+/// MCP-reserved code.
 pub const PAYMENT_REQUIRED_CODE: i32 = -33042;
 
 /// MPP-defined JSON-RPC error code for payment verification failed.
@@ -117,12 +109,10 @@ impl ProtocolError {
 
     /// Build a Missing-Required-Client-Capability error (`-32021`).
     ///
-    /// The `2026-07-28` wire returns this when a request needs a client
+    /// The wire returns this when a request needs a client
     /// capability the caller did not declare in its per-request
-    /// `_meta.io.modelcontextprotocol/clientCapabilities`. No producer
-    /// is wired on the modern dispatch path yet — the per-request
-    /// capability-enforcement gate is a later phase; this constructor
-    /// exists so that gate has a single canonical mint point.
+    /// `_meta.io.modelcontextprotocol/clientCapabilities`. It is the
+    /// single mint point for that error.
     pub fn missing_required_client_capability(
         id: Option<Value>,
         message: impl Into<String>,
@@ -176,3 +166,38 @@ impl std::fmt::Display for ProtocolError {
 }
 
 impl std::error::Error for ProtocolError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every code sits at the value the JSON-RPC / MCP / MPP contracts
+    /// require, and the application-range codes stay outside the spec
+    /// range.
+    #[test]
+    #[allow(
+        clippy::assertions_on_constants,
+        reason = "pins the wire values of the error codes"
+    )]
+    fn error_code_constants_are_stable() {
+        assert_eq!(PARSE_ERROR_CODE, -32700);
+        assert_eq!(INVALID_REQUEST_CODE, -32600);
+        assert_eq!(METHOD_NOT_FOUND_CODE, -32601);
+        assert_eq!(INVALID_PARAMS_CODE, -32602);
+        assert_eq!(INTERNAL_ERROR_CODE, -32603);
+        assert_eq!(HEADER_MISMATCH_CODE, -32020);
+        assert_eq!(MISSING_REQUIRED_CLIENT_CAPABILITY_CODE, -32021);
+        assert_eq!(UNSUPPORTED_PROTOCOL_VERSION_CODE, -32022);
+        assert!(PAYMENT_REQUIRED_CODE < -33000);
+        assert!(PAYMENT_VERIFICATION_FAILED_CODE < -33000);
+    }
+
+    #[test]
+    fn method_not_found_renders_into_the_jsonrpc_envelope() {
+        let err = ProtocolError::method_not_found(Some(serde_json::json!(3)), "x/y");
+        assert_eq!(err.code(), METHOD_NOT_FOUND_CODE);
+        let rendered = serde_json::to_value(err.into_jsonrpc_error()).unwrap();
+        assert_eq!(rendered["id"], 3);
+        assert_eq!(rendered["error"]["message"], "Method not found: x/y");
+    }
+}

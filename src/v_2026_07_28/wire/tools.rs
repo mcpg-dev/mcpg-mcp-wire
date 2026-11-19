@@ -1,6 +1,5 @@
-//! Modern `tools/*` wire types for MCP revision `2026-07-28`.
+//! `tools/*` wire types for MCP revision `2026-07-28`.
 //!
-//! Surface today:
 //! - `tools/list` request + result, with the SEP-2549
 //!   `CacheableResult` envelope (required `resultType` + `ttlMs` +
 //!   `cacheScope`) at the result level plus an optional per-entry
@@ -9,18 +8,15 @@
 //!   (the call ran to completion and returned content + optional
 //!   structured payload).
 //!
-//! Not yet here:
-//! - **MRTR `InputRequiredResult`** — the modern shape of a
-//!   suspended tools/call. Lives in
-//!   [`v_2026_07_28::wire::mrtr`](super::mrtr) and is selected via a
-//!   top-level result-type discriminator the handler unions in.
-//! - **Per-tool task augmentation** — the `task` opt-in on
-//!   `tools/call` was removed by SEP-2663 in the modern revision
-//!   (the server now decides per-call whether to surface a task).
+//! A suspended `tools/call` answers with the MRTR
+//! `InputRequiredResult` of [`v_2026_07_28::wire::mrtr`](super::mrtr),
+//! selected via the top-level `resultType` discriminator. Task
+//! materialization is server-directed (SEP-2663): a request carries no
+//! task opt-in.
 //!
 //! ## Cache surface (SEP-2549)
 //!
-//! The modern `tools/list` result is a `CacheableResult`: it carries
+//! The `tools/list` result is a `CacheableResult`: it carries
 //! a required `resultType` (always `"complete"` on this path), a
 //! required `ttlMs`, and a required `cacheScope`. The client caches
 //! the result for up to `ttlMs` milliseconds bucketed by
@@ -56,10 +52,6 @@ pub const METHOD_TOOLS_CALL: &str = "tools/call";
 /// Unknown strings fail deserialization (rather than masquerading
 /// as `Global` or `None`) so a misspelled `cacheScope` in a
 /// hand-tuned manifest doesn't silently change cache semantics.
-// SEP-2549 cache scope is a version-agnostic caching primitive; it
-// lives in `protocol::shared::caching` so the legacy wire can emit
-// the same vocabulary for forward-compatible clients. Re-exported
-// here so existing `wire::tools::CacheScope` imports stay valid.
 pub use crate::shared::caching::CacheScope;
 
 // ---------------------------------------------------------------------------
@@ -82,8 +74,7 @@ pub struct ToolsListParams {
 }
 
 /// Result of `tools/list`. A `CacheableResult` (SEP-2549): the
-/// `resultType` + `ttlMs` + `cacheScope` fields are required on the
-/// modern wire.
+/// `resultType` + `ttlMs` + `cacheScope` fields are required.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolsListResult {
@@ -121,8 +112,8 @@ impl Default for ToolsListResult {
 
 /// A single tool in the `tools/list` catalog page.
 ///
-/// `name`, `inputSchema`, `outputSchema` follow JSON Schema 2020-12
-/// per SEP-2106 (modern revision tightened the constraint).
+/// `inputSchema` and `outputSchema` follow JSON Schema 2020-12 per
+/// SEP-2106.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDescriptor {
@@ -141,7 +132,7 @@ pub struct ToolDescriptor {
     /// JSON Schema 2020-12 for the structured result body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<Value>,
-    /// Per-tool branding icons (same `Icon` shape as 2025-11-25).
+    /// Per-tool branding icons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icons: Option<Vec<Icon>>,
     /// Per-tool cache scope override. When present, the server is
@@ -164,9 +155,8 @@ pub struct ToolDescriptor {
 // `tools/call` shapes.
 // ---------------------------------------------------------------------------
 
-/// Parameters for `tools/call`. The modern revision dropped the
-/// per-call `task` opt-in (the server decides per-call whether to
-/// surface a task via the tasks extension).
+/// Parameters for `tools/call`. The server decides per call whether
+/// to surface a task via the tasks extension.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallParams {
@@ -183,8 +173,7 @@ pub struct ToolCallParams {
     /// SEP-2322 MRTR resumption — client echoes back the
     /// `requestState` blob from the prior `InputRequiredResult`
     /// alongside `inputResponses` keyed by the same correlation
-    /// tokens the server emitted. Top-level params field per the
-    /// spec, not under `_meta`.
+    /// tokens the server emitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_state: Option<String>,
     /// Companion to [`Self::request_state`]. Keys match the
@@ -201,7 +190,7 @@ pub struct ToolCallParams {
 ///
 /// ## `resultType` discriminator (SEP-2663)
 ///
-/// The modern `tools/call` result is one of three shapes
+/// The `tools/call` result is one of three shapes
 /// discriminated by `resultType`:
 /// - `"complete"` — this struct. The call ran to completion and
 ///   the body carries `content` + optional structured data.
@@ -229,8 +218,7 @@ pub struct ToolCallResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_type: Option<String>,
     /// Ordered content blocks (text / image / audio / resource /
-    /// resource_link). Same `ToolContent` enum as 2025-11-25
-    /// because content shapes are version-stable.
+    /// resource_link).
     #[serde(default)]
     pub content: Vec<ToolContent>,
     /// Structured payload validated against
@@ -250,7 +238,7 @@ pub struct ToolCallResult {
     pub meta: Option<Value>,
 }
 
-/// Discriminator constants for the modern `tools/call` result.
+/// Discriminator constants for the `tools/call` result.
 /// See [`ToolCallResult`] for the SEP-2663 rationale.
 pub const RESULT_TYPE_COMPLETE: &str = "complete";
 /// Discriminator value for MRTR suspensions. Defined alongside

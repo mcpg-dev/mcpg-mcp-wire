@@ -1,11 +1,9 @@
-//! Content block types shared across MCP protocol revisions.
+//! Content block types.
 //!
 //! [`ToolContent`], [`ContentAnnotations`], [`Icon`], and
-//! [`EmbeddedResource`] are part of the wire format both `2025-11-25`
-//! and `DRAFT-2026-v1` versions use verbatim. Putting them here lets
-//! the per-version wire modules import from
-//! `crate::shared::content` rather than redefining
-//! identical shapes.
+//! [`EmbeddedResource`] appear in tool results, prompt messages and
+//! resource descriptors alike, so every wire module imports them from
+//! here.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -197,7 +195,7 @@ mod tests {
         assert_eq!(v["mimeType"], "image/png");
         assert_eq!(v["sizes"][0], "48x48");
         assert_eq!(v["theme"], "dark");
-        assert!(v.get("url").is_none(), "no legacy `url` field");
+        assert!(v.get("url").is_none(), "an icon has `src`, not `url`");
     }
 
     #[test]

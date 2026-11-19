@@ -20,7 +20,7 @@ use crate::shared::messages::TransportRejection;
 
 /// HTTP header that carries the JSON-RPC `method` of the body. SEP-2243.
 ///
-/// Server-side: the modern HTTP transport validates that this header
+/// Server-side: the HTTP transport validates that this header
 /// matches the body's `method` field and rejects with HTTP 400 on
 /// mismatch.
 pub const METHOD_HEADER: &str = "mcp-method";
@@ -54,9 +54,9 @@ pub const X_MCP_HEADER_KEYWORD: &str = "x-mcp-header";
 /// whitespace, or a value that itself looks like the sentinel). The
 /// inverse of [`decode_header_value`].
 ///
-/// Used by the modern server when mirroring params into routing headers
-/// and by the federation client when emitting `Mcp-Name` /
-/// `Mcp-Param-{Name}` on a `2026-07-28` upstream POST.
+/// Used by the server when mirroring params into routing headers and
+/// by the federation client when emitting `Mcp-Name` /
+/// `Mcp-Param-{Name}` on an upstream POST.
 pub fn encode_header_value(value: &str) -> String {
     use base64::Engine as _;
     let needs_encoding = value.is_empty()

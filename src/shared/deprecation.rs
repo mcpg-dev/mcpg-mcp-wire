@@ -12,9 +12,9 @@
 //! that don't understand the key ignore it; clients that do can warn or
 //! steer migration.
 //!
-//! Usage of each deprecated feature on the modern wire is metered with
-//! a counter so an operator can see migration pressure before the
-//! removal window closes.
+//! Usage of each deprecated feature is metered with a counter so an
+//! operator can see migration pressure before the deprecation window
+//! closes.
 
 /// `_meta` key under which `server/discover` advertises the deprecated
 /// features. Vendor-namespaced (reverse-DNS `dev.mcpg`) so it does not
@@ -27,7 +27,7 @@ pub const FEATURE_ROOTS: &str = "roots";
 pub const FEATURE_SAMPLING: &str = "sampling";
 pub const FEATURE_LOGGING: &str = "logging";
 
-/// Meter one use of a deprecated feature on the modern wire. `feature`
+/// Meter one use of a deprecated feature. `feature`
 /// is one of the `FEATURE_*` constants. Emits
 /// `mcpg_deprecated_feature_used_total{feature=...}` so operators can
 /// track migration pressure during the deprecation window.

@@ -1,26 +1,15 @@
-//! Modern `prompts/*` wire types for MCP revision `2026-07-28`.
+//! `prompts/*` wire types for MCP revision `2026-07-28`.
 //!
-//! Surface today:
 //! - `prompts/list` request + result, with the SEP-2549
 //!   `CacheableResult` envelope (required `resultType` + `ttlMs` +
 //!   `cacheScope`) at the result level and an optional per-entry
 //!   `cacheScope` override on each [`PromptDescriptor`].
 //! - `prompts/get` request + result.
-//!
-//! ## Differences from 2025-11-25
-//!
-//! - Result-level + per-entry cache fields (SEP-2549).
-//! - `PromptDescriptor` is the per-version copy of the legacy
-//!   shape — the field set matches today but keeping a separate
-//!   module lets the modern prompt surface evolve (e.g., for
-//!   MRTR-aware multi-message prompts) without disturbing the
-//!   legacy contract.
 //! - `PromptMessage.content` is the full shared [`ContentBlock`]
 //!   ([`ToolContent`]) per the final schema (`PromptMessage.content`
 //!   is a `ContentBlock`), so a prompt message can carry the same
 //!   `name` / `annotations` / `size` / `icons` a tool-result content
-//!   block carries — no per-version subset that silently drops those
-//!   fields.
+//!   block carries — no subset that silently drops those fields.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -50,8 +39,7 @@ pub struct PromptsListParams {
 }
 
 /// Result of `prompts/list`. A `CacheableResult` (SEP-2549):
-/// `resultType` + `ttlMs` + `cacheScope` are required on the modern
-/// wire.
+/// `resultType` + `ttlMs` + `cacheScope` are required.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptsListResult {
@@ -139,10 +127,8 @@ pub struct PromptArgument {
 pub struct PromptGetParams {
     /// Prompt identifier (matches `PromptDescriptor.name`).
     pub name: String,
-    /// String-valued arguments. Modern revision keeps the legacy
-    /// `Map<String, String>` shape (not JSON Schema 2020-12 —
-    /// that's tools-only per SEP-2106) so prompt authors don't
-    /// re-spec.
+    /// String-valued arguments: a `Map<String, String>` shape (not
+    /// JSON Schema 2020-12 — that's tools-only per SEP-2106).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arguments: Option<serde_json::Map<String, Value>>,
     #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
@@ -181,7 +167,7 @@ pub struct PromptGetResult {
 /// `ContentBlock`, so the body is the shared [`ToolContent`] union —
 /// the same content primitive tool results use, carrying
 /// `name` / `annotations` / `size` / `icons` rather than a reduced
-/// per-version subset.
+/// subset.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptMessage {
     /// `"user"` or `"assistant"` per MCP spec.
@@ -359,10 +345,10 @@ mod tests {
 
     #[test]
     fn prompt_message_content_is_full_content_block() {
-        // CT-06: the prompt-message content is the full ContentBlock,
-        // so a resource_link carries the tool-content field set
-        // (`name` required, plus `size` / `icons`), not a reduced
-        // per-version subset that drops them.
+        // The prompt-message content is the full ContentBlock, so a
+        // resource_link carries the tool-content field set (`name`
+        // required, plus `size` / `icons`), not a reduced subset that
+        // drops them.
         let c = ToolContent::ResourceLink {
             uri: "mcpg://prompts/x".to_owned(),
             name: "x".to_owned(),

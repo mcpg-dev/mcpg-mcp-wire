@@ -12,7 +12,7 @@
 //! handler to call `promote_param_headers`. Encoding and decoding the
 //! same header belong together.
 
-use http::HeaderMap;
+use http::{HeaderMap, HeaderName};
 use serde_json::Value;
 
 use crate::shared::error::HEADER_MISMATCH_CODE;
@@ -31,6 +31,9 @@ pub const METHOD_HEADER: &str = "mcp-method";
 /// Used together with [`METHOD_HEADER`] so policy / rate-limit
 /// middleware can inspect the target name without parsing the body.
 pub const NAME_HEADER: &str = "mcp-name";
+
+/// [`NAME_HEADER`] as a header name: a lookup by it skips parsing the name.
+const NAME_HEADER_NAME: HeaderName = HeaderName::from_static(NAME_HEADER);
 
 /// HTTP header *prefix* for per-parameter routing hints. SEP-2243.
 ///
@@ -198,7 +201,7 @@ pub fn validate_name_header(
         .and_then(|p| p.get(source_field))
         .and_then(Value::as_str);
 
-    let raw_header = headers.get(NAME_HEADER).and_then(|v| v.to_str().ok());
+    let raw_header = headers.get(&NAME_HEADER_NAME).and_then(|v| v.to_str().ok());
 
     let Some(raw_header) = raw_header else {
         return Err(header_mismatch(

@@ -1,7 +1,7 @@
 //! Whether a change to an event type's schemas keeps its subscribers whole.
 //!
 //! A server that changes `inputSchema` or `payloadSchema` in a way a
-//! subscriber cannot absorb has to say so (`-32014 schema_changed`); one
+//! subscriber cannot absorb has to say so (`Unsupported` with `reason: "schema_changed"`); one
 //! that only describes more need not. A server and a client that compare
 //! two descriptors read the same rule here.
 

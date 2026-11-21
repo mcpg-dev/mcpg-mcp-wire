@@ -29,7 +29,8 @@ pub use crate::shared::PROTOCOL_VERSION_HEADER;
 
 pub use headers::{
     METHOD_HEADER, NAME_HEADER, PARAM_HEADER_PREFIX, X_MCP_HEADER_KEYWORD, decode_header_value,
-    encode_header_value, header_mismatch, name_source_field, promote_param_headers,
-    validate_name_header, validate_param_headers,
+    encode_header_value, header_mismatch, name_source_field, param_headers, promote_param_headers,
+    validate_annotated_param_headers, validate_name_header, validate_param_headers,
+    x_mcp_header_violation,
 };
 pub use request_meta::enforce_request_meta_triple;

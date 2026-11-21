@@ -138,15 +138,18 @@ pub struct ListSkillsResult {
     pub cache_scope: CacheScope,
 }
 
-/// `skills/get` result.
+/// `skills/get` result: a `CacheableResult`, so `ttlMs` and `cacheScope`
+/// are required.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GetSkillResult {
     pub result_type: String,
     pub skill: SkillEntry,
+    pub ttl_ms: u64,
+    pub cache_scope: CacheScope,
 }
 
-/// `resources/directory/read` result.
+/// `resources/directory/read` result: a paginated `CacheableResult`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadDirectoryResult {
@@ -154,6 +157,8 @@ pub struct ReadDirectoryResult {
     pub resources: Vec<ResourceDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    pub ttl_ms: u64,
+    pub cache_scope: CacheScope,
 }
 
 /// A routed Skills-extension request.
@@ -385,19 +390,28 @@ mod tests {
                 frontmatter: Map::new(),
                 resources: SkillResources::Dynamic,
             },
+            ttl_ms: 1_000,
+            cache_scope: CacheScope::Private,
         };
-        assert_eq!(
-            serde_json::to_value(&got).unwrap()["resultType"],
-            "complete"
-        );
+        let got = serde_json::to_value(&got).unwrap();
+        assert_eq!(got["resultType"], "complete");
+        assert_eq!(got["ttlMs"], 1_000);
+        assert_eq!(got["cacheScope"], "private");
         let listed = ReadDirectoryResult {
             result_type: "complete".to_owned(),
             resources: Vec::new(),
             next_cursor: None,
+            ttl_ms: 0,
+            cache_scope: CacheScope::Public,
         };
         assert_eq!(
             serde_json::to_value(&listed).unwrap(),
-            json!({ "resultType": "complete", "resources": [] })
+            json!({
+                "resultType": "complete",
+                "resources": [],
+                "ttlMs": 0,
+                "cacheScope": "public"
+            })
         );
     }
 

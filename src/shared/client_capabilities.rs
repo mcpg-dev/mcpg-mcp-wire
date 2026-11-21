@@ -67,6 +67,16 @@ pub struct ClientElicitationCapability {
 }
 
 impl ClientCapabilities {
+    /// The settings the client declares for extension `extension_id`, when
+    /// it declares the extension at a revision this build implements
+    /// ([`crate::shared::extension_revision`]).
+    pub fn supported_extension(&self, extension_id: &str) -> Option<&Value> {
+        crate::shared::extension_revision::supported_extension(
+            self.extensions.as_ref(),
+            extension_id,
+        )
+    }
+
     /// Check if the client supports sampling with tools.
     /// Per spec: client must declare `{ sampling: { tools: {} } }`.
     pub fn supports_sampling_tools(&self) -> bool {
@@ -202,6 +212,29 @@ mod tests {
 
         let v = serde_json::to_value(super::ClientCapabilities::default()).unwrap();
         assert!(v.get("extensions").is_none());
+    }
+
+    #[test]
+    fn an_extension_at_an_unknown_revision_is_not_supported() {
+        let caps = caps(json!({
+            "extensions": {
+                "io.modelcontextprotocol/tasks": {},
+                "io.modelcontextprotocol/events": { "revision": "2" },
+            }
+        }));
+        assert!(
+            caps.supported_extension("io.modelcontextprotocol/tasks")
+                .is_some()
+        );
+        assert!(
+            caps.supported_extension("io.modelcontextprotocol/events")
+                .is_none()
+        );
+        assert!(
+            super::ClientCapabilities::default()
+                .supported_extension("io.modelcontextprotocol/tasks")
+                .is_none()
+        );
     }
 
     #[test]

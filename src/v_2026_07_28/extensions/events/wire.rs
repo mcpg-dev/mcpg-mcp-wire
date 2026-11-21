@@ -19,7 +19,9 @@ use crate::shared::jsonrpc::JsonRpcErrorBody;
 /// (`capabilities.extensions["io.modelcontextprotocol/events"]`).
 pub const EXTENSION_ID: &str = "io.modelcontextprotocol/events";
 
-/// Key of the top-level advertisement (`capabilities.events`).
+/// Key of a top-level `capabilities.events` advertisement, which a server
+/// may add beside the extensions entry for a client that reads only that.
+/// A reader never looks for it.
 pub const CAPABILITY_KEY: &str = "events";
 
 /// List the event types the caller may subscribe to.
@@ -53,24 +55,28 @@ pub const WEBHOOK_SECRET_MAX_BYTES: usize = mcpg_standard_webhooks::MAX_SECRET_B
 /// larger one draws `413`, which the sender must not retry.
 pub const MAX_WEBHOOK_BODY_BYTES: usize = 262_144;
 
-/// `webhook-id` prefix of a control envelope; the full id is
-/// `msg_<type>_<random>`.
+/// `webhook-id` prefix: a control envelope's full id is
+/// `msg_<type>_<random>`, an event delivery's `msg_<random>`.
 pub const CONTROL_WEBHOOK_ID_PREFIX: &str = "msg_";
 
-/// The longest an `events/stream` may go without a data frame (an event or
-/// a heartbeat), in milliseconds.
-pub const MAX_STREAM_HEARTBEAT_MS: u64 = 30_000;
+/// The heartbeat interval of an `events/stream`, in milliseconds, that a
+/// server grants when the client suggests none, and that a client assumes
+/// until a grant arrives.
+pub const DEFAULT_HEARTBEAT_MS: u64 = 30_000;
+
+/// How many granted heartbeat intervals of silence make a client treat an
+/// `events/stream` as dead.
+pub const DEAD_STREAM_HEARTBEATS: u32 = 3;
 
 /// `true` for every method name in the `events/` namespace, routed or not.
 pub fn is_events_method(method: &str) -> bool {
     method.starts_with("events/")
 }
 
-/// The body param an `Mcp-Name` header mirrors on an `events/*` method
-/// that names an event type. SEP-2243 defines `Mcp-Name` for other
-/// methods only, so on these it is optional: validated when a client
-/// sends it, never required.
-pub fn optional_name_header_field(method: &str) -> Option<&'static str> {
+/// The body param the required `Mcp-Name` header mirrors on an `events/*`
+/// method that names an event type, over Streamable HTTP. `events/list`
+/// names none and carries no `Mcp-Name`.
+pub fn name_header_field(method: &str) -> Option<&'static str> {
     match method {
         METHOD_SUBSCRIBE_EVENTS
         | METHOD_UNSUBSCRIBE_EVENTS
@@ -84,8 +90,8 @@ pub fn optional_name_header_field(method: &str) -> Option<&'static str> {
 // Capability.
 // ---------------------------------------------------------------------------
 
-/// The capability object, advertised both as `capabilities.events` and
-/// as the value of the [`EXTENSION_ID`] extensions entry.
+/// The extension's settings object: the value of the [`EXTENSION_ID`]
+/// extensions entry (and of an optional top-level `capabilities.events`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventsCapability {
@@ -101,20 +107,14 @@ impl EventsCapability {
     }
 
     /// What `capabilities`, a server's capabilities object, advertises for
-    /// MCP Events: the [`EXTENSION_ID`] entry of its extensions map, else
-    /// its top-level [`CAPABILITY_KEY`] object. `None` when it advertises
-    /// neither; an entry this build cannot read counts as advertised, with
-    /// nothing known about it.
+    /// MCP Events: the [`EXTENSION_ID`] entry of its extensions map, at a
+    /// revision this build implements. `None` when it has none, or declares
+    /// another revision; an entry this build cannot otherwise read counts
+    /// as advertised, with nothing known about it.
     pub fn advertised_in(capabilities: &Value) -> Option<Self> {
-        let advertised = capabilities
-            .get("extensions")
-            .and_then(|extensions| extensions.get(EXTENSION_ID))
-            .filter(|entry| entry.is_object())
-            .or_else(|| {
-                capabilities
-                    .get(CAPABILITY_KEY)
-                    .filter(|entry| entry.is_object())
-            })?;
+        let advertised =
+            crate::shared::extension_revision::supported_extension_in(capabilities, EXTENSION_ID)
+                .filter(|entry| entry.is_object())?;
         Some(serde_json::from_value(advertised.clone()).unwrap_or_default())
     }
 }
@@ -443,13 +443,6 @@ fn optional_millis<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<
     }
 }
 
-/// Seconds from an older draft's field, converted to milliseconds.
-fn optional_seconds_as_millis<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<u64>, D::Error> {
-    Ok(optional_millis(deserializer)?.map(|s| s.saturating_mul(1000)))
-}
-
 /// `arguments` by [`arguments_from`], so absent and `null` address the
 /// same subscription.
 fn arguments_object<'de, D: Deserializer<'de>>(
@@ -532,12 +525,6 @@ struct RawSubscribeEventsParams {
     cursor: Option<String>,
     #[serde(default, deserialize_with = "optional_millis")]
     max_age_ms: Option<u64>,
-    #[serde(
-        default,
-        rename = "maxAge",
-        deserialize_with = "optional_seconds_as_millis"
-    )]
-    max_age_seconds_as_ms: Option<u64>,
     #[serde(default, deserialize_with = "ttl_request::deserialize")]
     ttl_ms: TtlRequest,
     #[serde(rename = "_meta", default)]
@@ -551,7 +538,7 @@ impl From<RawSubscribeEventsParams> for SubscribeEventsParams {
             arguments: raw.arguments,
             delivery: raw.delivery,
             cursor: raw.cursor,
-            max_age_ms: raw.max_age_ms.or(raw.max_age_seconds_as_ms),
+            max_age_ms: raw.max_age_ms,
             ttl_ms: raw.ttl_ms,
             meta: raw.meta,
         }
@@ -636,7 +623,7 @@ pub enum DeliveryErrorCategory {
     #[serde(rename = "challenge_failed")]
     ChallengeFailed,
     /// Delivery is paused by the operator. An mcpg category, reported in
-    /// `deliveryStatus.lastError` only, never as a `-32015` reason.
+    /// `deliveryStatus.lastError` only, never as a `CallbackEndpointError` reason.
     #[serde(rename = "paused")]
     Paused,
     /// A category this build does not know. Parsed, never emitted.
@@ -755,12 +742,6 @@ struct RawPollEventsParams {
     cursor: Option<String>,
     #[serde(default, deserialize_with = "optional_millis")]
     max_age_ms: Option<u64>,
-    #[serde(
-        default,
-        rename = "maxAge",
-        deserialize_with = "optional_seconds_as_millis"
-    )]
-    max_age_seconds_as_ms: Option<u64>,
     #[serde(default)]
     max_events: Option<u32>,
     #[serde(rename = "_meta", default)]
@@ -773,7 +754,7 @@ impl From<RawPollEventsParams> for PollEventsParams {
             name: raw.name,
             arguments: raw.arguments,
             cursor: raw.cursor,
-            max_age_ms: raw.max_age_ms.or(raw.max_age_seconds_as_ms),
+            max_age_ms: raw.max_age_ms,
             max_events: raw.max_events,
             meta: raw.meta,
         }
@@ -810,8 +791,6 @@ struct RawPollEventsResult {
     has_more: bool,
     #[serde(default, deserialize_with = "optional_millis")]
     next_poll_ms: Option<u64>,
-    #[serde(default, deserialize_with = "optional_seconds_as_millis")]
-    next_poll_seconds: Option<u64>,
     #[serde(rename = "_meta", default)]
     meta: Option<Value>,
 }
@@ -844,7 +823,7 @@ impl From<RawPollEventsResult> for PollEventsResult {
             cursor: raw.cursor,
             truncated: raw.truncated,
             has_more: raw.has_more,
-            next_poll_ms: raw.next_poll_ms.or(raw.next_poll_seconds).unwrap_or(0),
+            next_poll_ms: raw.next_poll_ms.unwrap_or(0),
             meta: raw.meta,
         }
     }
@@ -854,8 +833,9 @@ impl From<RawPollEventsResult> for PollEventsResult {
 // Push.
 // ---------------------------------------------------------------------------
 
-/// The stream is open: `{cursor, truncated}`. Sent first, and again with
-/// `truncated: true` when events were skipped mid-stream.
+/// The stream is open: `{cursor, truncated, heartbeatMs}`. Sent first, and
+/// again with `truncated: true` when events were skipped mid-stream; every
+/// one carries the granted heartbeat interval.
 pub const METHOD_NOTIFICATIONS_ACTIVE: &str = "notifications/events/active";
 /// One occurrence; the params are an [`EventOccurrence`].
 pub const METHOD_NOTIFICATIONS_EVENT: &str = "notifications/events/event";
@@ -876,6 +856,10 @@ pub struct StreamEventsParams {
     pub cursor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_age_ms: Option<u64>,
+    /// The heartbeat interval the client suggests, in milliseconds. The
+    /// server's grant on `notifications/events/active` is authoritative.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heartbeat_ms: Option<u64>,
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>,
 }
@@ -890,12 +874,8 @@ struct RawStreamEventsParams {
     cursor: Option<String>,
     #[serde(default, deserialize_with = "optional_millis")]
     max_age_ms: Option<u64>,
-    #[serde(
-        default,
-        rename = "maxAge",
-        deserialize_with = "optional_seconds_as_millis"
-    )]
-    max_age_seconds_as_ms: Option<u64>,
+    #[serde(default, deserialize_with = "optional_millis")]
+    heartbeat_ms: Option<u64>,
     #[serde(rename = "_meta", default)]
     meta: Option<Value>,
 }
@@ -906,7 +886,8 @@ impl From<RawStreamEventsParams> for StreamEventsParams {
             name: raw.name,
             arguments: raw.arguments,
             cursor: raw.cursor,
-            max_age_ms: raw.max_age_ms.or(raw.max_age_seconds_as_ms),
+            max_age_ms: raw.max_age_ms,
+            heartbeat_ms: raw.heartbeat_ms,
             meta: raw.meta,
         }
     }
@@ -918,6 +899,9 @@ pub enum StreamFrame {
     Active {
         cursor: Option<String>,
         truncated: bool,
+        /// The granted heartbeat interval, in milliseconds. A server
+        /// always sends it; a reader takes its absence as no grant.
+        heartbeat_ms: Option<u64>,
     },
     Event(EventOccurrence),
     Heartbeat {
@@ -944,8 +928,16 @@ impl StreamFrame {
     /// entries stay.
     pub fn to_notification(&self, subscription_id: &Value) -> Value {
         let params = match self {
-            Self::Active { cursor, truncated } => {
-                serde_json::json!({ "cursor": cursor, "truncated": truncated })
+            Self::Active {
+                cursor,
+                truncated,
+                heartbeat_ms,
+            } => {
+                let mut params = serde_json::json!({ "cursor": cursor, "truncated": truncated });
+                if let Some(heartbeat_ms) = heartbeat_ms {
+                    params["heartbeatMs"] = serde_json::json!(heartbeat_ms);
+                }
+                params
             }
             Self::Event(occurrence) => serde_json::to_value(occurrence).unwrap_or_default(),
             Self::Heartbeat { cursor } => serde_json::json!({ "cursor": cursor }),
@@ -969,11 +961,14 @@ impl StreamFrame {
     /// `subscriptionId`; `None` for any other message or a malformed one.
     pub fn from_notification(notification: &Value) -> Option<Self> {
         #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
         struct Positioned {
             #[serde(default)]
             cursor: Option<String>,
             #[serde(default)]
             truncated: bool,
+            #[serde(default)]
+            heartbeat_ms: Option<u64>,
         }
         #[derive(Deserialize)]
         struct Failed {
@@ -998,6 +993,7 @@ impl StreamFrame {
                 Some(Self::Active {
                     cursor: p.cursor,
                     truncated: p.truncated,
+                    heartbeat_ms: p.heartbeat_ms,
                 })
             }
             METHOD_NOTIFICATIONS_EVENT => serde_json::from_value(params).ok().map(Self::Event),
@@ -1034,7 +1030,9 @@ pub fn stream_events_result(id: &Value) -> Value {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventOccurrence {
-    /// Stable id for client-side dedup; the `webhook-id` of its POST.
+    /// Stable id of the upstream event, for client-side dedup within a
+    /// subscription. Never the `webhook-id` of a POST, which names the
+    /// delivered message.
     pub event_id: String,
     pub name: String,
     /// RFC 3339 time the event occurred.
@@ -1088,6 +1086,23 @@ impl ControlEnvelope {
     }
 }
 
+/// The `webhook-id` of the POST that delivers one event on one
+/// subscription: `msg_<random>`. The caller mints `random` once per
+/// message, high-entropy and of `[A-Za-z0-9_-]` only, and reuses it on
+/// every retry; it never derives it from the event id.
+pub fn event_webhook_id(random: &str) -> String {
+    format!("{CONTROL_WEBHOOK_ID_PREFIX}{random}")
+}
+
+/// Whether `id` may be sent as a `webhook-id`: non-empty, and only ASCII
+/// letters, digits, `_` and `-`.
+pub fn is_valid_webhook_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+}
+
 /// The 2xx body an endpoint answers a `verification` envelope with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationResponse {
@@ -1139,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn identifiers_match_the_sketch() {
+    fn identifiers_match_the_specification() {
         assert_eq!(EXTENSION_ID, "io.modelcontextprotocol/events");
         assert_eq!(CAPABILITY_KEY, "events");
         assert_eq!(METHOD_LIST_EVENTS, "events/list");
@@ -1180,21 +1195,21 @@ mod tests {
     }
 
     #[test]
-    fn methods_that_name_an_event_type_mirror_it_in_an_optional_mcp_name() {
+    fn methods_that_name_an_event_type_mirror_it_in_mcp_name() {
         for method in [
             "events/subscribe",
             "events/unsubscribe",
             "events/poll",
             "events/stream",
         ] {
-            assert_eq!(optional_name_header_field(method), Some("name"), "{method}");
+            assert_eq!(name_header_field(method), Some("name"), "{method}");
         }
-        assert_eq!(optional_name_header_field("events/list"), None);
-        assert_eq!(optional_name_header_field("tools/call"), None);
+        assert_eq!(name_header_field("events/list"), None);
+        assert_eq!(name_header_field("tools/call"), None);
     }
 
     #[test]
-    fn the_capability_is_read_from_either_location() {
+    fn the_capability_is_read_from_the_extensions_entry_only() {
         let flagged = EventsCapability {
             list_changed: Some(true),
         };
@@ -1203,23 +1218,18 @@ mod tests {
             EventsCapability::advertised_in(&extension),
             Some(flagged.clone())
         );
-        let top_level = json!({ CAPABILITY_KEY: {} });
-        assert_eq!(
-            EventsCapability::advertised_in(&top_level),
-            Some(EventsCapability::default())
-        );
         let both = json!({
             CAPABILITY_KEY: {},
             "extensions": { EXTENSION_ID: { "listChanged": true } }
         });
-        assert_eq!(
-            EventsCapability::advertised_in(&both),
-            Some(flagged),
-            "the extensions entry wins"
-        );
+        assert_eq!(EventsCapability::advertised_in(&both), Some(flagged));
+        let unknown_revision =
+            json!({ "extensions": { EXTENSION_ID: { "revision": "2099-01-01" } } });
+        assert_eq!(EventsCapability::advertised_in(&unknown_revision), None);
         for absent in [
             json!({}),
             json!({ "tools": {} }),
+            json!({ CAPABILITY_KEY: {} }),
             json!({ CAPABILITY_KEY: true }),
             json!({ "extensions": { EXTENSION_ID: null } }),
         ] {
@@ -1348,7 +1358,7 @@ mod tests {
     }
 
     #[test]
-    fn subscribe_params_parse_the_sketch_example() {
+    fn subscribe_params_parse_the_specification_example() {
         let params: SubscribeEventsParams = serde_json::from_value(subscribe_body()).unwrap();
         assert_eq!(params.name, "incident.created");
         assert_eq!(params.arguments["severity"], "P1");
@@ -1437,16 +1447,17 @@ mod tests {
         assert_eq!(params.delivery.mode, "push");
     }
 
+    /// Only the specification's field names are read: a `maxAge` is an
+    /// unknown field, ignored.
     #[test]
-    fn older_max_age_spelling_is_seconds() {
+    fn max_age_is_read_in_milliseconds_only() {
         let mut body = subscribe_body();
         let obj = body.as_object_mut().unwrap();
         obj.remove("maxAgeMs");
         obj.insert("maxAge".to_owned(), json!(300));
         let params: SubscribeEventsParams = serde_json::from_value(body.clone()).unwrap();
-        assert_eq!(params.max_age_ms, Some(300_000));
+        assert_eq!(params.max_age_ms, None);
 
-        // The current spelling wins when both are present.
         body["maxAgeMs"] = json!(1000);
         let params: SubscribeEventsParams = serde_json::from_value(body).unwrap();
         assert_eq!(params.max_age_ms, Some(1000));
@@ -1567,7 +1578,7 @@ mod tests {
     }
 
     #[test]
-    fn error_categories_use_the_sketch_spellings() {
+    fn error_categories_use_the_specification_spellings() {
         for (category, text) in [
             (
                 DeliveryErrorCategory::ConnectionRefused,
@@ -1644,12 +1655,12 @@ mod tests {
     }
 
     #[test]
-    fn poll_params_and_result_accept_older_spellings() {
+    fn poll_params_and_result_read_the_specification_names() {
         let params: PollEventsParams = serde_json::from_value(json!({
             "name": "email.received",
             "arguments": { "from": "*@example.com" },
             "cursor": null,
-            "maxAge": 300,
+            "maxAgeMs": 300000,
             "maxEvents": 50
         }))
         .unwrap();
@@ -1662,7 +1673,8 @@ mod tests {
             "cursor": "historyId_99842",
             "truncated": false,
             "hasMore": false,
-            "nextPollSeconds": 30
+            "nextPollMs": 30000,
+            "nextPollSeconds": 1
         }))
         .unwrap();
         assert_eq!(result.next_poll_ms, 30_000);
@@ -1723,7 +1735,7 @@ mod tests {
 
         let terminated = ControlEnvelope::Terminated {
             error: JsonRpcErrorBody {
-                code: -32012,
+                code: -32024,
                 message: "Forbidden".to_owned(),
                 data: Some(json!({ "reason": "revoked" })),
             },
@@ -1732,7 +1744,7 @@ mod tests {
             serde_json::to_value(&terminated).unwrap(),
             json!({
                 "type": "terminated",
-                "error": { "code": -32012, "message": "Forbidden", "data": { "reason": "revoked" } }
+                "error": { "code": -32024, "message": "Forbidden", "data": { "reason": "revoked" } }
             })
         );
         assert_eq!(terminated.webhook_id("x"), "msg_terminated_x");
@@ -1765,22 +1777,46 @@ mod tests {
             "name": "email.received",
             "arguments": { "from": "*@example.com" },
             "cursor": null,
-            "maxAge": 300
+            "maxAgeMs": 300000,
+            "heartbeatMs": 15000
         }))
         .unwrap();
         assert_eq!(params.cursor, None);
         assert_eq!(params.max_age_ms, Some(300_000));
+        assert_eq!(params.heartbeat_ms, Some(15_000));
+        let emitted = serde_json::to_value(&params).unwrap();
+        assert_eq!(emitted["heartbeatMs"], 15_000);
         let bare: StreamEventsParams = serde_json::from_value(json!({ "name": "x" })).unwrap();
         assert!(bare.arguments.is_empty());
+        assert_eq!(bare.heartbeat_ms, None);
+        assert!(
+            serde_json::to_value(&bare)
+                .unwrap()
+                .get("heartbeatMs")
+                .is_none()
+        );
     }
 
     #[test]
-    fn stream_frames_match_the_sketch() {
+    fn webhook_ids_are_header_safe() {
+        assert_eq!(
+            event_webhook_id("2KWPBgLlAfxdpx2AI54pPJ85f4W"),
+            "msg_2KWPBgLlAfxdpx2AI54pPJ85f4W"
+        );
+        assert!(is_valid_webhook_id("msg_gap_0a1b-C"));
+        for bad in ["", "msg.1", "evt 1", "a/b", "é"] {
+            assert!(!is_valid_webhook_id(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn stream_frames_match_the_specification() {
         let id = json!(1);
         assert_eq!(
             StreamFrame::Active {
                 cursor: Some("c1".to_owned()),
-                truncated: false
+                truncated: false,
+                heartbeat_ms: Some(15_000),
             }
             .to_notification(&id),
             json!({
@@ -1789,6 +1825,7 @@ mod tests {
                 "params": {
                     "cursor": "c1",
                     "truncated": false,
+                    "heartbeatMs": 15000,
                     "_meta": { "io.modelcontextprotocol/subscriptionId": 1 }
                 }
             })
@@ -1814,13 +1851,13 @@ mod tests {
             1
         );
         let terminated = StreamFrame::Terminated(JsonRpcErrorBody {
-            code: -32012,
+            code: -32024,
             message: "forbidden".to_owned(),
             data: Some(json!({ "reason": "revoked" })),
         })
         .to_notification(&id);
         assert_eq!(terminated["method"], "notifications/events/terminated");
-        assert_eq!(terminated["params"]["error"]["code"], -32012);
+        assert_eq!(terminated["params"]["error"]["code"], -32024);
         assert_eq!(
             stream_events_result(&id),
             json!({
@@ -1840,6 +1877,12 @@ mod tests {
             StreamFrame::Active {
                 cursor: Some("c1".to_owned()),
                 truncated: true,
+                heartbeat_ms: Some(30_000),
+            },
+            StreamFrame::Active {
+                cursor: None,
+                truncated: false,
+                heartbeat_ms: None,
             },
             StreamFrame::Heartbeat { cursor: None },
             StreamFrame::Event(EventOccurrence {
@@ -1856,7 +1899,7 @@ mod tests {
                 data: None,
             }),
             StreamFrame::Terminated(JsonRpcErrorBody {
-                code: -32012,
+                code: -32024,
                 message: "forbidden".to_owned(),
                 data: Some(json!({ "reason": "revoked" })),
             }),

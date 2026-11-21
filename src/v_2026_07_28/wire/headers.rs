@@ -327,27 +327,52 @@ fn json_scalar_to_header_string(value: &Value) -> Option<String> {
 /// posture. Values that need it are wrapped in the `=?base64?…?=`
 /// sentinel.
 pub fn promote_param_headers(input_schema: &Value, arguments: &Value) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::new();
-    let mut seen_lower: std::collections::HashSet<String> = std::collections::HashSet::new();
-    collect_promotions(input_schema, arguments, &mut out, &mut seen_lower);
+    annotated_params(input_schema, arguments)
+        .into_iter()
+        .filter_map(|param| {
+            let value = param.value?;
+            Some((
+                format!("{PARAM_HEADER_PREFIX}{}", param.header),
+                encode_header_value(&value),
+            ))
+        })
+        .collect()
+}
+
+/// One valid `x-mcp-header` annotation of a schema, with the value the
+/// arguments give it.
+struct AnnotatedParam {
+    /// The header name after `Mcp-Param-`, lower case.
+    header: String,
+    /// The header-string form of the argument; `None` when the arguments
+    /// carry no value (or `null`) for it.
+    value: Option<String>,
+}
+
+/// The valid `x-mcp-header` annotations of `schema`, each with its value
+/// in `instance`. Annotations that break a constraint are left out.
+fn annotated_params(schema: &Value, instance: &Value) -> Vec<AnnotatedParam> {
+    let mut out = Vec::new();
+    let mut seen_lower = std::collections::HashSet::new();
+    collect_promotions(schema, Some(instance), &mut out, &mut seen_lower);
     out
 }
 
 /// Walk a schema's `properties` chain (and only that chain) collecting
-/// valid `x-mcp-header` promotions. Recurses into nested object
+/// valid `x-mcp-header` annotations. Recurses into nested object
 /// `properties` but never through `items` / composition / `$ref`,
 /// mirroring the SEP "statically reachable" rule.
 fn collect_promotions(
     schema: &Value,
-    instance: &Value,
-    out: &mut Vec<(String, String)>,
+    instance: Option<&Value>,
+    out: &mut Vec<AnnotatedParam>,
     seen_lower: &mut std::collections::HashSet<String>,
 ) {
     let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
         return;
     };
     for (prop_name, prop_schema) in properties {
-        let instance_value = instance.get(prop_name);
+        let instance_value = instance.and_then(|instance| instance.get(prop_name));
 
         if let Some(header_name) = prop_schema
             .get(X_MCP_HEADER_KEYWORD)
@@ -357,13 +382,11 @@ fn collect_promotions(
         {
             let lower = header_name.to_ascii_lowercase();
             // Drop (exclude) on duplicate header name rather than fail.
-            if seen_lower.insert(lower)
-                && let Some(value) = instance_value.and_then(json_scalar_to_header_string)
-            {
-                out.push((
-                    format!("{PARAM_HEADER_PREFIX}{}", header_name.to_ascii_lowercase()),
-                    encode_header_value(&value),
-                ));
+            if seen_lower.insert(lower.clone()) {
+                out.push(AnnotatedParam {
+                    header: lower,
+                    value: instance_value.and_then(json_scalar_to_header_string),
+                });
             }
         }
 
@@ -372,11 +395,145 @@ fn collect_promotions(
             .get("type")
             .and_then(Value::as_str)
             .is_some_and(|t| t == "object")
-            && let Some(nested_instance) = instance_value
         {
-            collect_promotions(prop_schema, nested_instance, out, seen_lower);
+            collect_promotions(prop_schema, instance_value, out, seen_lower);
         }
     }
+}
+
+/// Why the `x-mcp-header` annotations of `input_schema` break the
+/// constraints the transport places on them, or `None` when they keep
+/// every one: each value is a non-empty HTTP token, unique among them
+/// regardless of case, on a `string`, `integer` or `boolean` property
+/// reached through `properties` only. A client drops a definition whose
+/// annotations break a constraint.
+pub fn x_mcp_header_violation(input_schema: &Value) -> Option<String> {
+    let mut seen_lower = std::collections::HashSet::new();
+    annotation_violation(input_schema, "", &mut seen_lower)
+}
+
+fn annotation_violation(
+    schema: &Value,
+    path: &str,
+    seen_lower: &mut std::collections::HashSet<String>,
+) -> Option<String> {
+    let properties = schema.get("properties").and_then(Value::as_object)?;
+    for (prop_name, prop_schema) in properties {
+        let at = if path.is_empty() {
+            prop_name.clone()
+        } else {
+            format!("{path}.{prop_name}")
+        };
+        if let Some(annotation) = prop_schema.get(X_MCP_HEADER_KEYWORD) {
+            let Some(header_name) = annotation.as_str() else {
+                return Some(format!("`{at}`: {X_MCP_HEADER_KEYWORD} is not a string"));
+            };
+            if !is_valid_header_token(header_name) {
+                return Some(format!(
+                    "`{at}`: {X_MCP_HEADER_KEYWORD} `{header_name}` is not an HTTP token"
+                ));
+            }
+            if !is_promotable_primitive(prop_schema) {
+                return Some(format!(
+                    "`{at}`: {X_MCP_HEADER_KEYWORD} is only allowed on a string, integer or \
+                     boolean property"
+                ));
+            }
+            if !seen_lower.insert(header_name.to_ascii_lowercase()) {
+                return Some(format!(
+                    "`{at}`: {X_MCP_HEADER_KEYWORD} `{header_name}` is used more than once"
+                ));
+            }
+        }
+        if let Some(violation) = annotation_violation(prop_schema, &at, seen_lower) {
+            return Some(violation);
+        }
+    }
+    None
+}
+
+/// Validate the `Mcp-Param-{Name}` headers of a request against the
+/// `x-mcp-header` annotations of `input_schema` and the request's
+/// `arguments`. `headers` holds each `Mcp-Param-` header as its lower-case
+/// name after the prefix and its raw value.
+///
+/// Every annotated argument with a value needs its header, equal to the
+/// value after sentinel decode; an annotated argument without a value
+/// must not have one. A header no annotation names is not checked here.
+/// The error names the header, never its value.
+pub fn validate_annotated_param_headers(
+    input_schema: &Value,
+    arguments: &Value,
+    headers: &[(String, String)],
+) -> Result<(), String> {
+    for param in annotated_params(input_schema, arguments) {
+        let sent = headers
+            .iter()
+            .find(|(name, _)| *name == param.header)
+            .map(|(_, raw)| raw.as_str());
+        match (param.value, sent) {
+            (None, None) => {}
+            (Some(_), None) => {
+                return Err(format!(
+                    "the `Mcp-Param-{}` header is required: the arguments carry the value \
+                     it mirrors",
+                    param.header
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(format!(
+                    "`Mcp-Param-{}` is sent, but the arguments carry no value for it",
+                    param.header
+                ));
+            }
+            (Some(value), Some(raw)) => match decode_header_value(raw) {
+                Some(decoded) if decoded == value => {}
+                Some(_) => {
+                    return Err(format!(
+                        "the `Mcp-Param-{}` header does not match the argument it mirrors",
+                        param.header
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "the `Mcp-Param-{}` header carries a malformed `=?base64?…?=` value",
+                        param.header
+                    ));
+                }
+            },
+        }
+    }
+    Ok(())
+}
+
+/// Each `Mcp-Param-{Name}` header of `headers`, as its lower-case name
+/// after the prefix and its value. A header whose value is not visible
+/// ASCII, or whose `=?base64?…?=` value is malformed, is a
+/// `HeaderMismatch` rejection.
+pub fn param_headers(
+    headers: &HeaderMap,
+    jsonrpc_id: Option<Value>,
+) -> Result<Vec<(String, String)>, TransportRejection> {
+    let mut out = Vec::new();
+    for (name, value) in headers.iter() {
+        let Some(param) = name.as_str().strip_prefix(PARAM_HEADER_PREFIX) else {
+            continue;
+        };
+        let Some(raw) = value.to_str().ok() else {
+            return Err(header_mismatch(
+                &format!("`Mcp-Param-{param}` header carries non-ASCII bytes"),
+                jsonrpc_id,
+            ));
+        };
+        if decode_header_value(raw).is_none() {
+            return Err(header_mismatch(
+                &format!("`Mcp-Param-{param}` header carries a malformed `=?base64?…?=` value"),
+                jsonrpc_id,
+            ));
+        }
+        out.push((param.to_owned(), raw.to_owned()));
+    }
+    Ok(out)
 }
 
 /// Whether a property schema is a primitive type eligible for header
@@ -470,5 +627,99 @@ mod tests {
         });
         let headers = promote_param_headers(&schema, &args);
         assert_eq!(headers, vec![("mcp-param-ok".to_owned(), "yes".to_owned())]);
+    }
+
+    #[test]
+    fn x_mcp_header_violations_are_named() {
+        let valid = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "region": { "type": "string", "x-mcp-header": "Region" },
+                "limits": {
+                    "type": "object",
+                    "properties": { "tier": { "type": "integer", "x-mcp-header": "Tier" } }
+                },
+                "plain": { "type": "string" }
+            }
+        });
+        assert_eq!(x_mcp_header_violation(&valid), None);
+        for bad in [
+            serde_json::json!({ "properties": { "a": { "type": "string", "x-mcp-header": "" } } }),
+            serde_json::json!({ "properties": { "a": { "type": "string", "x-mcp-header": "A B" } } }),
+            serde_json::json!({ "properties": { "a": { "type": "number", "x-mcp-header": "A" } } }),
+            serde_json::json!({ "properties": { "a": { "type": "string", "x-mcp-header": 7 } } }),
+            serde_json::json!({ "properties": {
+                "a": { "type": "string", "x-mcp-header": "Dup" },
+                "b": { "type": "string", "x-mcp-header": "dup" }
+            } }),
+            serde_json::json!({ "properties": { "o": { "type": "object", "properties": {
+                "a": { "type": "array", "x-mcp-header": "A" }
+            } } } }),
+        ] {
+            assert!(x_mcp_header_violation(&bad).is_some(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn annotated_param_headers_must_mirror_the_arguments() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "region": { "type": "string", "x-mcp-header": "Region" },
+                "tier": { "type": "integer", "x-mcp-header": "TierLevel" },
+                "note": { "type": "string" }
+            }
+        });
+        let args = serde_json::json!({ "region": "Zürich", "tier": 2, "note": "x" });
+        let good = vec![
+            ("region".to_owned(), encode_header_value("Zürich")),
+            ("tierlevel".to_owned(), "2".to_owned()),
+            ("unrelated".to_owned(), "anything".to_owned()),
+        ];
+        assert_eq!(
+            validate_annotated_param_headers(&schema, &args, &good),
+            Ok(())
+        );
+
+        let missing = vec![("region".to_owned(), encode_header_value("Zürich"))];
+        let error = validate_annotated_param_headers(&schema, &args, &missing).unwrap_err();
+        assert!(error.contains("Mcp-Param-tierlevel"), "{error}");
+
+        let wrong = vec![
+            ("region".to_owned(), "Bern".to_owned()),
+            ("tierlevel".to_owned(), "2".to_owned()),
+        ];
+        let error = validate_annotated_param_headers(&schema, &args, &wrong).unwrap_err();
+        assert!(
+            error.contains("Mcp-Param-region") && !error.contains("Bern"),
+            "{error}"
+        );
+
+        let no_value = serde_json::json!({ "region": null });
+        let stray = vec![("region".to_owned(), "x".to_owned())];
+        assert!(validate_annotated_param_headers(&schema, &no_value, &stray).is_err());
+        assert_eq!(
+            validate_annotated_param_headers(&schema, &no_value, &[]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn param_headers_are_collected_and_checked_for_shape() {
+        let mut headers = HeaderMap::new();
+        headers.insert("mcp-param-region", "us-west1".parse().unwrap());
+        headers.insert("mcp-name", "x".parse().unwrap());
+        let Ok(collected) = param_headers(&headers, None) else {
+            panic!("well-formed headers are collected");
+        };
+        assert_eq!(
+            collected,
+            vec![("region".to_owned(), "us-west1".to_owned())]
+        );
+        headers.insert("mcp-param-bad", "=?base64?not base64!?=".parse().unwrap());
+        let Err(rejection) = param_headers(&headers, None) else {
+            panic!("a malformed sentinel is refused");
+        };
+        assert_eq!(rejection.error_code, HEADER_MISMATCH_CODE);
     }
 }

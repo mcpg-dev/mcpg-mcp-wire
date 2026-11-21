@@ -55,6 +55,20 @@ pub const METHOD_NOTIFICATIONS_TASKS: &str = "notifications/tasks";
 /// (`complete` / `input_required` / `task`).
 pub const RESULT_TYPE_TASK: &str = "task";
 
+/// `message` of the `-32021` error a request that needs the extension gets
+/// from a client that did not declare it.
+pub const TASKS_CAPABILITY_REQUIRED_MESSAGE: &str = "Missing required client capability";
+
+/// `data` of that `-32021` error: the `requiredCapabilities` naming the
+/// extension.
+pub fn required_capabilities_data() -> Value {
+    serde_json::json!({
+        "requiredCapabilities": {
+            "extensions": { EXTENSION_NAMESPACE: {} }
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Core task object.
 // ---------------------------------------------------------------------------
@@ -143,6 +157,10 @@ pub struct CreateTaskResult {
     /// The seed task (flattened — SEP-2663 `Result & Task`).
     #[serde(flatten)]
     pub task: Task,
+    /// Every other member, such as `_meta` or another extension's field.
+    /// The result is an open object, so a relay keeps them.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 fn default_result_type_task() -> String {
@@ -154,6 +172,7 @@ impl CreateTaskResult {
         Self {
             result_type: RESULT_TYPE_TASK.to_owned(),
             task,
+            extra: serde_json::Map::new(),
         }
     }
 }
@@ -180,6 +199,10 @@ pub struct GetTaskResult {
     pub result_type: String,
     #[serde(flatten)]
     pub task: Task,
+    /// Every other member, such as `_meta` or another extension's field.
+    /// The result is an open object, so a relay keeps them.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 fn default_result_type_complete() -> String {
@@ -191,6 +214,7 @@ impl GetTaskResult {
         Self {
             result_type: "complete".to_owned(),
             task,
+            extra: serde_json::Map::new(),
         }
     }
 }
@@ -383,6 +407,38 @@ mod tests {
         assert_eq!(v["taskId"], "task-1");
         assert_eq!(v["status"], "working");
         assert!(v.get("task").is_none());
+    }
+
+    #[test]
+    fn task_results_keep_members_they_do_not_define() {
+        let created = serde_json::json!({
+            "resultType": "task",
+            "taskId": "task-1",
+            "status": "working",
+            "createdAt": "2026-07-28T00:00:00Z",
+            "lastUpdatedAt": "2026-07-28T00:00:00Z",
+            "ttlMs": null,
+            "_meta": { "example.com/trace": "abc" },
+            "example.com/hint": { "queue": 3 }
+        });
+        let parsed: CreateTaskResult = serde_json::from_value(created.clone()).unwrap();
+        assert_eq!(parsed.task.task_id, "task-1");
+        assert_eq!(parsed.extra.len(), 2);
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), created);
+
+        let got = serde_json::json!({
+            "resultType": "complete",
+            "taskId": "task-1",
+            "status": "completed",
+            "createdAt": "2026-07-28T00:00:00Z",
+            "lastUpdatedAt": "2026-07-28T00:00:01Z",
+            "ttlMs": 60000,
+            "result": { "content": [] },
+            "example.com/cost": 0.5
+        });
+        let parsed: GetTaskResult = serde_json::from_value(got.clone()).unwrap();
+        assert_eq!(parsed.task.status, TaskStatus::Completed);
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), got);
     }
 
     #[test]

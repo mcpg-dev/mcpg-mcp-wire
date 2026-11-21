@@ -22,6 +22,8 @@
 //!   resource / resource link).
 //! - [`deprecation`] — SEP-2596 feature-lifecycle deprecation
 //!   advertisements + usage metering.
+//! - [`extension_revision`] — the extension revisions this build
+//!   implements, and whether a peer's declared revision is one of them.
 //! - [`messages`] — the parsed [`messages::ProtocolMessage`] and the
 //!   [`messages::TransportRejection`] that cross from the protocol
 //!   handler to the runtime.
@@ -44,6 +46,7 @@ pub mod completion;
 pub mod content;
 pub mod deprecation;
 pub mod error;
+pub mod extension_revision;
 pub mod id_validation;
 pub mod jsonrpc;
 pub mod messages;

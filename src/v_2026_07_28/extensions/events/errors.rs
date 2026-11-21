@@ -1,10 +1,9 @@
 //! Error codes of the MCP Events extension and their typed `data`.
 //!
-//! The constants below are the codes as the gateway reasons about them.
-//! The wire has two numberings ([`CodeNumbering`]): `-32011` to `-32015`,
-//! which the ChatGPT profile documents, and `-32023` to `-32027`, which
-//! the SEP-3415 sketch uses. A server renumbers at its output; a reader
-//! accepts both.
+//! The constants below are the specification's codes, `-32023` to
+//! `-32027`. A server may write the older `-32011` to `-32015` instead
+//! ([`CodeNumbering::Draft`]) for a client that still expects them; it
+//! renumbers at its output. A reader takes the specification's codes only.
 //!
 //! Each code carries a family of conditions; the `data` object tells them
 //! apart (`{kind}`, `{reason}`, `{limit, max?}`, `{feature, value?,
@@ -13,56 +12,48 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::shared::error::{INTERNAL_ERROR_CODE, INVALID_PARAMS_CODE};
+use crate::shared::error::{HEADER_MISMATCH_CODE, INTERNAL_ERROR_CODE, INVALID_PARAMS_CODE};
 use crate::shared::jsonrpc::{JSONRPC_VERSION, JsonRpcError, JsonRpcErrorBody};
 use crate::v_2026_07_28::extensions::events::wire::DeliveryErrorCategory;
 
-/// An unknown event name, or no subscription for the key on unsubscribe.
-pub const NOT_FOUND_CODE: i32 = -32011;
-/// The principal may not use this event with these arguments, its access
-/// was revoked, or it is not authenticated at all.
-pub const FORBIDDEN_CODE: i32 = -32012;
-/// A server limit or quota was reached.
-pub const RESOURCE_EXHAUSTED_CODE: i32 = -32013;
-/// Well-formed, but asks for something this server does not offer.
-pub const UNSUPPORTED_CODE: i32 = -32014;
-/// The callback endpoint failed verification or could not be reached.
-pub const CALLBACK_ENDPOINT_ERROR_CODE: i32 = -32015;
+/// `NotFound`: an unknown event name, or no subscription for the key on
+/// unsubscribe.
+pub const NOT_FOUND_CODE: i32 = -32023;
+/// `Forbidden`: the principal may not use this event with these arguments,
+/// its access was revoked, or it is not authenticated at all.
+pub const FORBIDDEN_CODE: i32 = -32024;
+/// `ResourceExhausted`: a server limit or quota was reached.
+pub const RESOURCE_EXHAUSTED_CODE: i32 = -32025;
+/// `Unsupported`: well-formed, but asks for something this server does not
+/// offer.
+pub const UNSUPPORTED_CODE: i32 = -32026;
+/// `CallbackEndpointError`: the callback endpoint failed verification or
+/// could not be reached.
+pub const CALLBACK_ENDPOINT_ERROR_CODE: i32 = -32027;
 
-/// How far the SEP-3415 numbering moves each code.
-const SEP_3415_SHIFT: i32 = 12;
+/// How far the draft numbering moves each code.
+const DRAFT_SHIFT: i32 = 12;
 
 /// How the extension's five codes are numbered on the wire.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CodeNumbering {
-    /// `-32011` to `-32015`: the numbers the ChatGPT profile documents.
+    /// `-32023` to `-32027`: the specification's codes.
     #[default]
+    Spec,
+    /// `-32011` to `-32015`: the codes of the pre-Beta drafts, which the
+    /// ChatGPT profile documents.
     Draft,
-    /// `-32023` to `-32027`: the numbers the SEP-3415 sketch uses.
-    #[serde(rename = "sep_3415")]
-    Sep3415,
 }
 
 impl CodeNumbering {
     /// `code` as this numbering writes it. Any other code is unchanged.
     pub fn wire_code(self, code: i32) -> i32 {
         match self {
-            Self::Sep3415 if (CALLBACK_ENDPOINT_ERROR_CODE..=NOT_FOUND_CODE).contains(&code) => {
-                code - SEP_3415_SHIFT
+            Self::Draft if (CALLBACK_ENDPOINT_ERROR_CODE..=NOT_FOUND_CODE).contains(&code) => {
+                code + DRAFT_SHIFT
             }
             _ => code,
-        }
-    }
-
-    /// The code a reader means by `code` under either numbering.
-    pub fn normalize(code: i32) -> i32 {
-        let sep_3415 =
-            (CALLBACK_ENDPOINT_ERROR_CODE - SEP_3415_SHIFT)..=(NOT_FOUND_CODE - SEP_3415_SHIFT);
-        if sep_3415.contains(&code) {
-            code + SEP_3415_SHIFT
-        } else {
-            code
         }
     }
 }
@@ -76,7 +67,7 @@ pub const FEATURE_PAYLOAD_SCHEMA: &str = "payloadSchema";
 /// `data.reason` of an in-place, non-additive schema change.
 pub const REASON_SCHEMA_CHANGED: &str = "schema_changed";
 
-/// What a `-32011` did not find.
+/// What a `NotFound` did not find.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NotFoundKind {
@@ -86,14 +77,14 @@ pub enum NotFoundKind {
     Unknown,
 }
 
-/// `data` of `-32011`.
+/// `data` of `NotFound`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotFoundData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<NotFoundKind>,
 }
 
-/// `data.reason` of `-32012`: why the principal may not have the events.
+/// `data.reason` of `Forbidden`: why the principal may not have the events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ForbiddenReason {
@@ -148,14 +139,14 @@ impl ForbiddenReason {
     }
 }
 
-/// `data` of `-32012`.
+/// `data` of `Forbidden`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForbiddenData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<ForbiddenReason>,
 }
 
-/// `data` of `-32013`.
+/// `data` of `ResourceExhausted`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceExhaustedData {
     /// The limit that was reached, e.g. `"subscriptions"`.
@@ -164,7 +155,7 @@ pub struct ResourceExhaustedData {
     pub max: Option<u64>,
 }
 
-/// `data` of `-32014`.
+/// `data` of `Unsupported`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnsupportedData {
     pub feature: String,
@@ -174,7 +165,7 @@ pub struct UnsupportedData {
     pub reason: Option<String>,
 }
 
-/// `data` of `-32015`.
+/// `data` of `CallbackEndpointError`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallbackEndpointErrorData {
     pub reason: DeliveryErrorCategory,
@@ -191,14 +182,14 @@ pub enum EventsErrorData {
 }
 
 impl EventsErrorData {
-    /// Parse `data` by `code`, in either numbering. `None` for a code
-    /// outside the events family, or `data` that does not fit the code's
-    /// shape. A not-found or forbidden code without `data` parses as the
-    /// empty shape (its fields are optional).
+    /// Parse `data` by `code`. `None` for a code outside the events family,
+    /// or `data` that does not fit the code's shape. A not-found or
+    /// forbidden code without `data` parses as the empty shape (its fields
+    /// are optional).
     pub fn parse(code: i32, data: Option<&Value>) -> Option<Self> {
         let empty = Value::Object(Map::new());
         let data = data.unwrap_or(&empty).clone();
-        match CodeNumbering::normalize(code) {
+        match code {
             NOT_FOUND_CODE => serde_json::from_value(data).ok().map(Self::NotFound),
             FORBIDDEN_CODE => serde_json::from_value(data).ok().map(Self::Forbidden),
             RESOURCE_EXHAUSTED_CODE => serde_json::from_value(data)
@@ -239,7 +230,7 @@ impl EventsError {
         }
     }
 
-    /// `-32011` with `data.kind`.
+    /// `NotFound` with `data.kind`.
     pub fn not_found(kind: NotFoundKind) -> Self {
         let message = match kind {
             NotFoundKind::Event => "event type not found",
@@ -253,7 +244,7 @@ impl EventsError {
         }
     }
 
-    /// `-32012 {reason}`.
+    /// `Forbidden {reason}`.
     pub fn forbidden(reason: ForbiddenReason) -> Self {
         Self {
             code: FORBIDDEN_CODE,
@@ -264,7 +255,7 @@ impl EventsError {
         }
     }
 
-    /// `-32013` with `data.limit` and, when known, `data.max`.
+    /// `ResourceExhausted` with `data.limit` and, when known, `data.max`.
     pub fn resource_exhausted(limit: &str, max: Option<u64>) -> Self {
         Self {
             code: RESOURCE_EXHAUSTED_CODE,
@@ -276,7 +267,7 @@ impl EventsError {
         }
     }
 
-    /// `-32014` for a feature this server does not offer.
+    /// `Unsupported` for a feature this server does not offer.
     pub fn unsupported(feature: &str, value: Option<Value>) -> Self {
         Self {
             code: UNSUPPORTED_CODE,
@@ -289,12 +280,12 @@ impl EventsError {
         }
     }
 
-    /// `-32014 {feature: "deliveryMode", value: mode}`.
+    /// `Unsupported {feature: "deliveryMode", value: mode}`.
     pub fn unsupported_delivery_mode(mode: &str) -> Self {
         Self::unsupported(FEATURE_DELIVERY_MODE, Some(Value::String(mode.to_owned())))
     }
 
-    /// `-32014 {feature, reason: "schema_changed"}`: the type's schema
+    /// `Unsupported {feature, reason: "schema_changed"}`: the type's schema
     /// changed in place; the client re-lists and resubscribes.
     pub fn schema_changed(feature: &str) -> Self {
         Self {
@@ -308,7 +299,8 @@ impl EventsError {
         }
     }
 
-    /// `-32015 {reason}`. `reason` is one of the six endpoint categories;
+    /// `CallbackEndpointError {reason}`. `reason` is one of the six
+    /// endpoint categories;
     /// [`DeliveryErrorCategory::Paused`] describes the server, not the
     /// endpoint, and does not belong here.
     pub fn callback_endpoint(reason: DeliveryErrorCategory) -> Self {
@@ -316,6 +308,17 @@ impl EventsError {
             code: CALLBACK_ENDPOINT_ERROR_CODE,
             message: format!("callback endpoint error: {}", reason.as_str()),
             data: data_value(&CallbackEndpointErrorData { reason }),
+        }
+    }
+
+    /// `HeaderMismatch` (`-32020`): an `Mcp-Param-{Name}` header the event
+    /// type's `x-mcp-header` annotations call for is missing, or disagrees
+    /// with the arguments. `message` names the header, never a value.
+    pub fn header_mismatch(message: impl Into<String>) -> Self {
+        Self {
+            code: HEADER_MISMATCH_CODE,
+            message: message.into(),
+            data: None,
         }
     }
 
@@ -416,18 +419,18 @@ mod tests {
     }
 
     #[test]
-    fn codes_are_the_sketch_numbers() {
-        assert_eq!(NOT_FOUND_CODE, -32011);
-        assert_eq!(FORBIDDEN_CODE, -32012);
-        assert_eq!(RESOURCE_EXHAUSTED_CODE, -32013);
-        assert_eq!(UNSUPPORTED_CODE, -32014);
-        assert_eq!(CALLBACK_ENDPOINT_ERROR_CODE, -32015);
+    fn codes_are_the_specification_numbers() {
+        assert_eq!(NOT_FOUND_CODE, -32023);
+        assert_eq!(FORBIDDEN_CODE, -32024);
+        assert_eq!(RESOURCE_EXHAUSTED_CODE, -32025);
+        assert_eq!(UNSUPPORTED_CODE, -32026);
+        assert_eq!(CALLBACK_ENDPOINT_ERROR_CODE, -32027);
     }
 
     #[test]
     fn not_found_names_its_kind() {
         let event = EventsError::not_found(NotFoundKind::Event);
-        assert_eq!(event.code(), -32011);
+        assert_eq!(event.code(), -32023);
         assert_eq!(body(&event)["data"], json!({ "kind": "event" }));
         let subscription = EventsError::not_found(NotFoundKind::Subscription);
         assert_eq!(
@@ -445,7 +448,7 @@ mod tests {
     #[test]
     fn forbidden_names_its_reason() {
         let revoked = EventsError::forbidden(ForbiddenReason::Revoked);
-        assert_eq!(revoked.code(), -32012);
+        assert_eq!(revoked.code(), -32024);
         assert_eq!(body(&revoked)["data"], json!({ "reason": "revoked" }));
         let policy_engine = EventsError::forbidden(ForbiddenReason::PolicyEngine);
         assert_eq!(
@@ -453,7 +456,7 @@ mod tests {
             json!({ "reason": "policy_engine" })
         );
         assert_eq!(
-            EventsErrorData::parse(-32012, None),
+            EventsErrorData::parse(-32024, None),
             Some(EventsErrorData::Forbidden(ForbiddenData { reason: None }))
         );
     }
@@ -481,7 +484,7 @@ mod tests {
             );
         }
         assert_eq!(
-            EventsErrorData::parse(-32012, Some(&json!({ "reason": "quarantined" }))),
+            EventsErrorData::parse(-32024, Some(&json!({ "reason": "quarantined" }))),
             Some(EventsErrorData::Forbidden(ForbiddenData {
                 reason: Some(ForbiddenReason::Unknown)
             }))
@@ -491,7 +494,7 @@ mod tests {
     #[test]
     fn resource_exhausted_names_the_limit() {
         let error = EventsError::resource_exhausted("subscriptions", Some(100));
-        assert_eq!(error.code(), -32013);
+        assert_eq!(error.code(), -32025);
         assert_eq!(
             body(&error)["data"],
             json!({ "limit": "subscriptions", "max": 100 })
@@ -506,7 +509,7 @@ mod tests {
     #[test]
     fn unsupported_shapes() {
         let mode = EventsError::unsupported_delivery_mode("push");
-        assert_eq!(mode.code(), -32014);
+        assert_eq!(mode.code(), -32026);
         assert_eq!(
             body(&mode)["data"],
             json!({ "feature": "deliveryMode", "value": "push" })
@@ -521,7 +524,7 @@ mod tests {
     #[test]
     fn callback_endpoint_error_carries_the_category() {
         let error = EventsError::callback_endpoint(DeliveryErrorCategory::ChallengeFailed);
-        assert_eq!(error.code(), -32015);
+        assert_eq!(error.code(), -32027);
         assert_eq!(
             body(&error)["data"],
             json!({ "reason": "challenge_failed" })
@@ -568,44 +571,57 @@ mod tests {
     #[test]
     fn parse_tolerates_foreign_codes_and_shapes() {
         assert_eq!(EventsErrorData::parse(-32601, None), None);
-        assert_eq!(EventsErrorData::parse(-32013, Some(&json!({}))), None);
+        assert_eq!(EventsErrorData::parse(-32025, Some(&json!({}))), None);
         assert_eq!(
-            EventsErrorData::parse(-32011, Some(&json!({ "kind": "galaxy" }))),
+            EventsErrorData::parse(-32023, Some(&json!({ "kind": "galaxy" }))),
             Some(EventsErrorData::NotFound(NotFoundData {
                 kind: Some(NotFoundKind::Unknown)
             }))
         );
     }
 
+    /// A reader takes the specification's codes only: a draft code is no
+    /// events code to it.
     #[test]
-    fn each_numbering_writes_its_own_codes_and_a_reader_takes_both() {
+    fn parse_reads_only_the_specification_codes() {
+        for draft in [-32011, -32012, -32013, -32014, -32015] {
+            assert_eq!(
+                EventsErrorData::parse(draft, Some(&json!({ "kind": "event" }))),
+                None,
+                "{draft}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_numbering_writes_its_own_codes() {
+        let spec = [-32023, -32024, -32025, -32026, -32027];
         let draft = [-32011, -32012, -32013, -32014, -32015];
-        let sep_3415 = [-32023, -32024, -32025, -32026, -32027];
-        for (old, new) in draft.into_iter().zip(sep_3415) {
-            assert_eq!(CodeNumbering::Draft.wire_code(old), old);
-            assert_eq!(CodeNumbering::Sep3415.wire_code(old), new);
-            assert_eq!(CodeNumbering::normalize(new), old);
-            assert_eq!(CodeNumbering::normalize(old), old);
+        for (code, old) in spec.into_iter().zip(draft) {
+            assert_eq!(CodeNumbering::Spec.wire_code(code), code);
+            assert_eq!(CodeNumbering::Draft.wire_code(code), old);
         }
         for other in [
-            -32602, -32603, -32601, -32022, -32029, -32010, -32016, -32028,
+            -32602, -32603, -32601, -32020, -32022, -32029, -32010, -32016, -32028,
         ] {
-            assert_eq!(CodeNumbering::Sep3415.wire_code(other), other);
-            assert_eq!(CodeNumbering::normalize(other), other);
+            assert_eq!(CodeNumbering::Spec.wire_code(other), other);
+            assert_eq!(CodeNumbering::Draft.wire_code(other), other);
         }
         let renumbered =
-            EventsError::resource_exhausted("streams", Some(16)).numbered(CodeNumbering::Sep3415);
-        assert_eq!(renumbered.code(), -32025);
+            EventsError::resource_exhausted("streams", Some(16)).numbered(CodeNumbering::Draft);
+        assert_eq!(renumbered.code(), -32013);
         assert_eq!(
-            typed(&renumbered),
-            Some(EventsErrorData::ResourceExhausted(ResourceExhaustedData {
-                limit: "streams".to_owned(),
-                max: Some(16),
-            }))
+            body(&renumbered)["data"],
+            json!({ "limit": "streams", "max": 16 })
+        );
+        assert_eq!(CodeNumbering::default(), CodeNumbering::Spec);
+        assert_eq!(
+            serde_json::to_value(CodeNumbering::Spec).unwrap(),
+            json!("spec")
         );
         assert_eq!(
-            serde_json::to_value(CodeNumbering::Sep3415).unwrap(),
-            json!("sep_3415")
+            serde_json::to_value(CodeNumbering::Draft).unwrap(),
+            json!("draft")
         );
     }
 }

@@ -330,7 +330,7 @@ pub fn promote_param_headers(input_schema: &Value, arguments: &Value) -> Vec<(St
     annotated_params(input_schema, arguments)
         .into_iter()
         .filter_map(|param| {
-            let value = param.value?;
+            let value = param.value?.header_string();
             Some((
                 format!("{PARAM_HEADER_PREFIX}{}", param.header),
                 encode_header_value(&value),
@@ -344,9 +344,94 @@ pub fn promote_param_headers(input_schema: &Value, arguments: &Value) -> Vec<(St
 struct AnnotatedParam {
     /// The header name after `Mcp-Param-`, lower case.
     header: String,
-    /// The header-string form of the argument; `None` when the arguments
-    /// carry no value (or `null`) for it.
-    value: Option<String>,
+    /// The argument; `None` when the arguments carry no value (or `null`)
+    /// for it.
+    value: Option<ParamValue>,
+}
+
+/// The value of an annotated argument, as a header is compared with it.
+enum ParamValue {
+    /// A string or boolean argument, compared as its header string.
+    Text(String),
+    /// A whole-number argument of an `integer` property, compared by number.
+    Integer(i128),
+}
+
+impl ParamValue {
+    /// The value of `value` for a property of schema `prop_schema`.
+    fn of(prop_schema: &Value, value: &Value) -> Option<Self> {
+        if prop_schema.get("type").and_then(Value::as_str) == Some("integer")
+            && let Some(number) = value.as_number()
+        {
+            return integral(number).map(Self::Integer);
+        }
+        json_scalar_to_header_string(value).map(Self::Text)
+    }
+
+    /// The header string a client sends for this value.
+    fn header_string(self) -> String {
+        match self {
+            Self::Text(text) => text,
+            Self::Integer(n) => n.to_string(),
+        }
+    }
+
+    /// Whether the decoded header value `decoded` carries this value. An
+    /// integer compares by number, so `42` and `42.0` are the same.
+    fn matches(&self, decoded: &str) -> bool {
+        match self {
+            Self::Text(text) => text == decoded,
+            Self::Integer(n) => decimal_integer(decoded) == Some(*n),
+        }
+    }
+}
+
+/// Largest magnitude a JSON float holds as an exact whole number (2^53 - 1).
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+/// The whole number `number` holds: any integer, or a float with no
+/// fraction in the range a float holds exactly.
+fn integral(number: &serde_json::Number) -> Option<i128> {
+    if let Some(n) = number.as_i64() {
+        return Some(i128::from(n));
+    }
+    if let Some(n) = number.as_u64() {
+        return Some(i128::from(n));
+    }
+    let f = number.as_f64()?;
+    (f.fract() == 0.0 && f.abs() <= MAX_SAFE_INTEGER).then_some(f as i128)
+}
+
+/// The whole number a decimal header value names: an optional `-`, digits,
+/// and an optional fraction of zeros (`42`, `-7`, `42.0`). Other notation
+/// (`+42`, `1e2`, ` 42`) names none.
+fn decimal_integer(text: &str) -> Option<i128> {
+    let (negative, unsigned) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (whole, fraction) = match unsigned.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (unsigned, None),
+    };
+    if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if let Some(fraction) = fraction
+        && (fraction.is_empty() || !fraction.bytes().all(|b| b == b'0'))
+    {
+        return None;
+    }
+    let digits = whole.trim_start_matches('0');
+    if digits.len() > 20 {
+        return None;
+    }
+    let magnitude: i128 = if digits.is_empty() {
+        0
+    } else {
+        digits.parse().ok()?
+    };
+    Some(if negative { -magnitude } else { magnitude })
 }
 
 /// The valid `x-mcp-header` annotations of `schema`, each with its value
@@ -385,7 +470,7 @@ fn collect_promotions(
             if seen_lower.insert(lower.clone()) {
                 out.push(AnnotatedParam {
                     header: lower,
-                    value: instance_value.and_then(json_scalar_to_header_string),
+                    value: instance_value.and_then(|value| ParamValue::of(prop_schema, value)),
                 });
             }
         }
@@ -458,7 +543,8 @@ fn annotation_violation(
 /// name after the prefix and its raw value.
 ///
 /// Every annotated argument with a value needs its header, equal to the
-/// value after sentinel decode; an annotated argument without a value
+/// value after sentinel decode (by number for an `integer` property, so
+/// `42` and `42.0` are the same); an annotated argument without a value
 /// must not have one. A header no annotation names is not checked here.
 /// The error names the header, never its value.
 pub fn validate_annotated_param_headers(
@@ -487,7 +573,7 @@ pub fn validate_annotated_param_headers(
                 ));
             }
             (Some(value), Some(raw)) => match decode_header_value(raw) {
-                Some(decoded) if decoded == value => {}
+                Some(decoded) if value.matches(&decoded) => {}
                 Some(_) => {
                     return Err(format!(
                         "the `Mcp-Param-{}` header does not match the argument it mirrors",
@@ -701,6 +787,72 @@ mod tests {
         assert_eq!(
             validate_annotated_param_headers(&schema, &no_value, &[]),
             Ok(())
+        );
+    }
+
+    /// An integer argument matches its header by number; a string or a
+    /// boolean matches only its exact header string.
+    #[test]
+    fn integer_param_headers_compare_by_number() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tier": { "type": "integer", "x-mcp-header": "Tier" },
+                "code": { "type": "string", "x-mcp-header": "Code" },
+                "dry": { "type": "boolean", "x-mcp-header": "Dry" }
+            }
+        });
+        let check = |args: serde_json::Value, tier: &str| {
+            validate_annotated_param_headers(
+                &schema,
+                &args,
+                &[("tier".to_owned(), tier.to_owned())],
+            )
+        };
+        let tier = |n: serde_json::Value| serde_json::json!({ "tier": n });
+        let forty_two = || tier(serde_json::json!(42));
+
+        for header in ["42", "42.0", "42.000", "042", "=?base64?NDIuMA==?="] {
+            assert_eq!(check(forty_two(), header), Ok(()), "{header}");
+        }
+        assert_eq!(check(tier(serde_json::json!(42.0)), "42"), Ok(()));
+        assert_eq!(check(tier(serde_json::json!(-7)), "-7.0"), Ok(()));
+        assert_eq!(check(tier(serde_json::json!(0)), "-0"), Ok(()));
+        let safe_max = tier(serde_json::json!(9_007_199_254_740_991_i64));
+        assert_eq!(check(safe_max, "9007199254740991"), Ok(()));
+        let refused = [
+            "43", "42.5", "1e2", "4.2e1", "+42", " 42", "42.", ".0", "0x2a", "",
+        ];
+        for header in refused {
+            assert!(check(forty_two(), header).is_err(), "{header:?}");
+        }
+        assert!(check(tier(serde_json::json!(100)), "1e2").is_err());
+
+        // A string argument that looks like a number stays a string.
+        let code = |header: &str| {
+            validate_annotated_param_headers(
+                &schema,
+                &serde_json::json!({ "code": "42" }),
+                &[("code".to_owned(), header.to_owned())],
+            )
+        };
+        assert_eq!(code("42"), Ok(()));
+        assert!(code("42.0").is_err());
+        let dry = |header: &str| {
+            validate_annotated_param_headers(
+                &schema,
+                &serde_json::json!({ "dry": true }),
+                &[("dry".to_owned(), header.to_owned())],
+            )
+        };
+        assert_eq!(dry("true"), Ok(()));
+        assert!(dry("True").is_err());
+        assert!(dry("1").is_err());
+
+        // Promotion sends the decimal form of a whole number.
+        assert_eq!(
+            promote_param_headers(&schema, &tier(serde_json::json!(42.0))),
+            vec![("mcp-param-tier".to_owned(), "42".to_owned())]
         );
     }
 

@@ -344,6 +344,8 @@ pub fn promote_param_headers(input_schema: &Value, arguments: &Value) -> Vec<(St
 struct AnnotatedParam {
     /// The header name after `Mcp-Param-`, lower case.
     header: String,
+    /// The header name after `Mcp-Param-`, as the annotation spells it.
+    name: String,
     /// The argument; `None` when the arguments carry no value (or `null`)
     /// for it.
     value: Option<ParamValue>,
@@ -470,6 +472,7 @@ fn collect_promotions(
             if seen_lower.insert(lower.clone()) {
                 out.push(AnnotatedParam {
                     header: lower,
+                    name: header_name.to_owned(),
                     value: instance_value.and_then(|value| ParamValue::of(prop_schema, value)),
                 });
             }
@@ -563,13 +566,13 @@ pub fn validate_annotated_param_headers(
                 return Err(format!(
                     "the `Mcp-Param-{}` header is required: the arguments carry the value \
                      it mirrors",
-                    param.header
+                    param.name
                 ));
             }
             (None, Some(_)) => {
                 return Err(format!(
                     "`Mcp-Param-{}` is sent, but the arguments carry no value for it",
-                    param.header
+                    param.name
                 ));
             }
             (Some(value), Some(raw)) => match decode_header_value(raw) {
@@ -577,13 +580,13 @@ pub fn validate_annotated_param_headers(
                 Some(_) => {
                     return Err(format!(
                         "the `Mcp-Param-{}` header does not match the argument it mirrors",
-                        param.header
+                        param.name
                     ));
                 }
                 None => {
                     return Err(format!(
                         "the `Mcp-Param-{}` header carries a malformed `=?base64?…?=` value",
-                        param.header
+                        param.name
                     ));
                 }
             },
@@ -769,7 +772,7 @@ mod tests {
 
         let missing = vec![("region".to_owned(), encode_header_value("Zürich"))];
         let error = validate_annotated_param_headers(&schema, &args, &missing).unwrap_err();
-        assert!(error.contains("Mcp-Param-tierlevel"), "{error}");
+        assert!(error.contains("Mcp-Param-TierLevel"), "{error}");
 
         let wrong = vec![
             ("region".to_owned(), "Bern".to_owned()),
@@ -777,7 +780,7 @@ mod tests {
         ];
         let error = validate_annotated_param_headers(&schema, &args, &wrong).unwrap_err();
         assert!(
-            error.contains("Mcp-Param-region") && !error.contains("Bern"),
+            error.contains("Mcp-Param-Region") && !error.contains("Bern"),
             "{error}"
         );
 
